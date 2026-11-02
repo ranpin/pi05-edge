@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Large artifacts (live on-device, not in git)
+data/
+checkpoints/
+*.ckpt/
+
+# Eval outputs
+*.mp4
+*.h5
+
+# OS
+.DS_Store
