@@ -88,7 +88,7 @@
 
 | L1 口径 | 值 | 何时出现 | 机制 |
 |---|---|---|---|
-| **boosted** | ~490-504 ms | 背靠背推理（`g2_verify.py` N=20 连发、或 async prefetch 让 GPU 持续忙） | GPU 维持 boost ~1300 MHz |
+| **boosted** | ~487-515 ms | 背靠背推理（`g2_verify.py` N=20 连发、`g4_profile.py` 扫描、或 async prefetch 让 GPU 持续忙） | GPU 维持 boost ~1300 MHz |
 | **throttled** | ~570-587 ms | 同步闭环（GPU 在两次推理间空转，等仿真 stepping + 网络） | GPU 掉到 306 MHz 地板，每次推理从低频爬坡 |
 
 测量工具 `scripts/sim/probe_server_latency.py`：固定 dummy obs、只变「调用间隔 gap」这一个独立变量——gap=0→504ms、0.3→527、0.6→558、1.0→569（单调升趋平台）；并发采 `/sys/class/devfreq/17000000.gpu/cur_freq` 直接看到 **306↔1300.5 MHz 双峰振荡**（4.25× 跨度）。**报任何 L1 数字必须标明 boosted 还是 throttled 口径**，否则占空比结论会错（见 REPORT.md 表 2 / 表 3）。
@@ -126,6 +126,12 @@ docker run --rm --runtime nvidia \
 | `prompt` | str |
 
 内部映射到 `base_0_rgb` / `left_wrist_0_rgb` / `right_wrist_0_rgb`（后者填零）。真实 eval 时客户端从 256×256 渲染 `resize_with_pad` 到 224，并**旋转 180°**（`[::-1, ::-1]`）以匹配训练预处理。
+
+### 3.3 G4 · num_steps 扫描与延迟分解
+
+`scripts/orin/g4_profile.py`：in-process 加载 policy 后，对 num_steps ∈ [10,5,3,2,1] 逐个设 `policy._sample_kwargs["num_steps"]=N`（num_steps 是 `sample_actions` 的关键字参数、JIT 静态整数，每值重编译），每值 3 次 warmup 吸收重编译 + 15 次计时。由 `L(N)=prefix+N×per_step` 反解 `per_step=(L10−L1)/9`、`prefix=L1−per_step`，并用 implied per_step=(L(N)−prefix)/N 跨 N 检验线性度（实测 14.6–14.8 ms，完美线性）。
+
+复现命令同 §3.1（把 `g2_verify.py` 换成 `g4_profile.py`）。**须先停掉 websocket server**（`docker stop g3_policy_server`）释放 GPU，避免 2 份模型（~22GB）挤 32GB 统一内存 + 争用污染计时。结果见 [REPORT.md 表 4](REPORT.md)。
 
 ## 4. 官方 eval 协议（G3 必须照此复现）
 
