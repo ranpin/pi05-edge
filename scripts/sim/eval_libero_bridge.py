@@ -12,6 +12,13 @@ Adapted from openpi examples/libero/main.py (the official LIBERO eval). Differen
 - measures L2 (client-side end-to-end obs->action wall time) per inference, and records the
   server's self-reported inference time (response["server_timing"]["infer_ms"] = L1), so the
   network+serialization overhead = L2 - L1 falls out directly.
+- --prefetch adds an async action-chunk prefetcher (Top2): a background thread infers the next
+  chunk while the current one executes. In a real-time loop this keeps the Orin GPU continuously
+  busy so it stays at boost clock (probe_server_latency.py measured back-to-back 504ms vs
+  idle-gap 587ms — a ~16% DVFS penalty); the tradeoff is that each prefetched chunk is inferred
+  from an observation ~1 chunk stale. NOTE: the LIBERO sim steps slower than real time (osmesa
+  ~155ms/step >> the 50ms budget), so in-sim the GPU idles regardless and prefetch mainly
+  exercises the staleness->success-rate axis, not the clock benefit.
 - host/port are CLI args (nothing hardcoded); per-episode results stream to a JSONL file.
 
 Run from this directory so the vendored `openpi_client` package is importable:
@@ -26,6 +33,7 @@ import os
 import pathlib
 import pickle
 import sys
+import threading
 import time
 import types
 import zipfile
@@ -67,12 +75,86 @@ MAX_STEPS = {
 }
 
 
+class AsyncChunkPrefetcher:
+    """Infers the next action chunk on a background thread so the policy query overlaps execution.
+
+    The worker keeps up to `depth` chunks buffered, re-inferring from the latest observation the
+    main loop pushed via update_obs(). Because inference (~504ms) takes about as long as executing
+    a 10-action chunk at 20Hz (~500ms), keeping the GPU fed requires looking ~1 chunk ahead, so a
+    prefetched chunk is inferred from an obs ~1 chunk old — that staleness is the cost being measured.
+    """
+
+    def __init__(self, client, replan_steps, depth=1):
+        self.client = client
+        self.replan_steps = replan_steps
+        self.depth = max(1, depth)
+        self._buf = collections.deque()
+        self._cv = threading.Condition()
+        self._latest_obs = None
+        self._stop = False
+        self._error = None
+        self.l1_ms = []  # server infer_ms per produced chunk
+        self.l2_ms = []  # client round-trip per produced chunk
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def update_obs(self, element):
+        with self._cv:
+            self._latest_obs = element
+            self._cv.notify_all()
+
+    def _run(self):
+        while True:
+            with self._cv:
+                while not self._stop and (self._latest_obs is None or len(self._buf) >= self.depth):
+                    self._cv.wait(0.01)
+                if self._stop:
+                    return
+                obs = self._latest_obs
+            try:
+                t0 = time.perf_counter()
+                result = self.client.infer(obs)  # blocking, but off the main (sim) thread
+                l2 = (time.perf_counter() - t0) * 1000.0
+            except Exception as e:  # surface to the consumer thread
+                with self._cv:
+                    self._error = e
+                    self._cv.notify_all()
+                return
+            l1 = result.get("server_timing", {}).get("infer_ms")
+            actions = list(np.asarray(result["actions"])[: self.replan_steps])
+            with self._cv:
+                if self._stop:
+                    return
+                self._buf.append(actions)
+                self.l2_ms.append(l2)
+                if l1 is not None:
+                    self.l1_ms.append(l1)
+                self._cv.notify_all()
+
+    def next_chunk(self, timeout=180.0):
+        with self._cv:
+            end = time.time() + timeout
+            while not self._buf and not self._stop and self._error is None and time.time() < end:
+                self._cv.wait(0.01)
+            if self._error is not None:
+                raise self._error
+            return self._buf.popleft() if self._buf else None
+
+    def shutdown(self):
+        with self._cv:
+            self._stop = True
+            self._cv.notify_all()
+        self._thread.join(timeout=15)
+
+
 def parse_args():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--host", default="127.0.0.1", help="policy server host (the Orin box running serve_policy.py)")
     p.add_argument("--port", type=int, default=8000)
     p.add_argument("--resize_size", type=int, default=224)
     p.add_argument("--replan_steps", type=int, default=5, help="actions executed per policy query (official default 5)")
+    p.add_argument("--prefetch", action="store_true", help="async prefetch: infer next chunk on a background thread while executing")
+    p.add_argument("--prefetch_depth", type=int, default=1, help="chunks to keep buffered ahead (prefetch mode)")
     p.add_argument("--task_suite_name", default="libero_spatial")
     p.add_argument("--num_steps_wait", type=int, default=10, help="dummy-action steps to let objects settle")
     p.add_argument("--num_trials_per_task", type=int, default=50)
@@ -93,7 +175,10 @@ def eval_libero(args) -> None:
 
     task_suite = benchmark.get_benchmark_dict()[args.task_suite_name]()
     num_tasks = task_suite.n_tasks if args.max_tasks <= 0 else min(args.max_tasks, task_suite.n_tasks)
-    logging.info(f"Task suite: {args.task_suite_name} | evaluating {num_tasks}/{task_suite.n_tasks} tasks")
+    logging.info(
+        f"Task suite: {args.task_suite_name} | {num_tasks}/{task_suite.n_tasks} tasks | "
+        f"replan_steps={args.replan_steps} | prefetch={args.prefetch}"
+    )
 
     imageio = None
     if args.record_video:
@@ -124,6 +209,9 @@ def eval_libero(args) -> None:
             done = False
             replay_images = []
             ep_l2_ms, ep_server_ms = [], []
+            prefetcher = (
+                AsyncChunkPrefetcher(client, args.replan_steps, args.prefetch_depth) if args.prefetch else None
+            )
 
             while t < max_steps + args.num_steps_wait:
                 try:
@@ -145,7 +233,9 @@ def eval_libero(args) -> None:
                     if args.record_video:
                         replay_images.append(img)
 
-                    if not action_plan:
+                    # Prefetch needs the obs element every step (to keep the worker fed the latest obs);
+                    # sync only needs it when the queue drains.
+                    if args.prefetch or not action_plan:
                         element = {
                             "observation/image": img,
                             "observation/wrist_image": wrist_img,
@@ -158,15 +248,25 @@ def eval_libero(args) -> None:
                             ),
                             "prompt": str(task_description),
                         }
-                        # L2 = client-side end-to-end obs->action wall time (network + server inference).
-                        t0 = time.perf_counter()
-                        result = client.infer(element)
-                        l2_ms = (time.perf_counter() - t0) * 1000.0
-                        action_chunk = result["actions"]
-                        server_ms = result.get("server_timing", {}).get("infer_ms")
-                        ep_l2_ms.append(l2_ms)
-                        if server_ms is not None:
-                            ep_server_ms.append(server_ms)
+
+                    if args.prefetch:
+                        prefetcher.update_obs(element)
+
+                    if not action_plan:
+                        if args.prefetch:
+                            action_chunk = prefetcher.next_chunk()
+                            if action_chunk is None:
+                                raise RuntimeError("prefetcher returned no chunk (worker died?)")
+                        else:
+                            # L2 = client-side end-to-end obs->action wall time (network + server inference).
+                            t0 = time.perf_counter()
+                            result = client.infer(element)
+                            l2_ms = (time.perf_counter() - t0) * 1000.0
+                            action_chunk = result["actions"]
+                            server_ms = result.get("server_timing", {}).get("infer_ms")
+                            ep_l2_ms.append(l2_ms)
+                            if server_ms is not None:
+                                ep_server_ms.append(server_ms)
                         if not chunk_shape_logged:
                             logging.info(f"action_chunk shape={np.asarray(action_chunk).shape}")
                             chunk_shape_logged = True
@@ -185,6 +285,10 @@ def eval_libero(args) -> None:
                 except Exception as e:
                     logging.error(f"Caught exception: {e}")
                     break
+
+            if prefetcher is not None:
+                ep_l2_ms, ep_server_ms = prefetcher.l2_ms, prefetcher.l1_ms
+                prefetcher.shutdown()
 
             task_episodes += 1
             total_episodes += 1
@@ -224,6 +328,7 @@ def eval_libero(args) -> None:
         "SUMMARY": {
             "task_suite": args.task_suite_name,
             "replan_steps": args.replan_steps,
+            "prefetch": args.prefetch,
             "tasks_evaluated": num_tasks,
             "total_episodes": total_episodes,
             "total_successes": total_successes,
