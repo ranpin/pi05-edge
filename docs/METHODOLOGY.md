@@ -74,13 +74,24 @@
 
 | 口径 | 定义 | 测量方式 | 回答什么 | 状态 |
 |---|---|---|---|---|
-| **L1** | Orin 本地单次策略推理墙钟，**in-process，不含任何网络** | `scripts/orin/g2_verify.py`：3 次 warmup 吸收 JIT，然后 N=20 次 `policy.infer()` 取墙钟 | 「 Orin 能跑多快」（引擎地板） | ✅ 已测 |
-| **L2** | obs → Orin 推理 → action 回仿真机的**端到端往返** | 跨机 websocket，客户端侧计时 | 「闭环实际控制频率」 | ⏳ G3 |
+| **L1** | Orin 本地单次策略推理墙钟，**in-process，不含任何网络** | `scripts/orin/g2_verify.py`：3 次 warmup 吸收 JIT，然后 N=20 次 `policy.infer()` 取墙钟 | 「Orin 能跑多快」（引擎地板） | ✅ 已测 |
+| **L2** | obs → Orin 推理 → action 回仿真机的**端到端往返** | 跨机 websocket，客户端侧计时（`scripts/sim/eval_libero_bridge.py`） | 「闭环实际控制频率」 | ✅ 已测（**L2−L1 ≈ 7 ms**） |
 | **L3** | LIBERO 期望的控制频率 | 源码核实 = **20 Hz** | 参照系 | ✅ 已核实 |
 
 **「边缘实时性」的判据是 L2 vs L3，不是 L1。** L1 只是引擎地板；把 L1 的 Hz 当成控制频率，是同类项目最容易被打穿的口径错误。
 
 ⚠️ **L1 必须走 in-process，不能走 websocket**。`serve_policy.py` + `WebsocketClientPolicy` 那条路掺网络往返，只能用于 L2。
+
+### 🔴 L1 不是常数：GPU DVFS 让它分两个口径（G3 实测）
+
+同一个 L1，取决于两次推理之间 GPU 是否空转：
+
+| L1 口径 | 值 | 何时出现 | 机制 |
+|---|---|---|---|
+| **boosted** | ~490-504 ms | 背靠背推理（`g2_verify.py` N=20 连发、或 async prefetch 让 GPU 持续忙） | GPU 维持 boost ~1300 MHz |
+| **throttled** | ~570-587 ms | 同步闭环（GPU 在两次推理间空转，等仿真 stepping + 网络） | GPU 掉到 306 MHz 地板，每次推理从低频爬坡 |
+
+测量工具 `scripts/sim/probe_server_latency.py`：固定 dummy obs、只变「调用间隔 gap」这一个独立变量——gap=0→504ms、0.3→527、0.6→558、1.0→569（单调升趋平台）；并发采 `/sys/class/devfreq/17000000.gpu/cur_freq` 直接看到 **306↔1300.5 MHz 双峰振荡**（4.25× 跨度）。**报任何 L1 数字必须标明 boosted 还是 throttled 口径**，否则占空比结论会错（见 REPORT.md 表 2 / 表 3）。
 
 ## 3. 复现命令
 
