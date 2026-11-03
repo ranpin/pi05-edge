@@ -13,6 +13,8 @@ checkpoints/
 # Eval outputs
 *.mp4
 *.h5
+# 例外：demo 页的 rollout 展示视频是刻意入库的小资产
+!docs/assets/*.mp4
 
 # OS
 .DS_Store

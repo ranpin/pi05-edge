@@ -314,7 +314,8 @@ def eval_libero(args) -> None:
                 imageio.mimwrite(
                     pathlib.Path(args.video_out_path) / f"rollout_{seg}_{suffix}_t{task_id}e{episode_idx}.mp4",
                     [np.asarray(x) for x in replay_images],
-                    fps=10,
+                    # 1 frame = 1 control step; play at control_freq (20 Hz) = real robot pace.
+                    fps=20,
                 )
 
             logging.info(
