@@ -100,7 +100,7 @@
       <div class="stats">
         <div class="stat"><div class="v">99<small>%</small></div><div class="k">成功率 @ num_steps=10<br>100 ep · 官方报告 98.8</div></div>
         <div class="stat"><div class="v">487.7<small>ms</small></div><div class="k">L1 纯推理（2.05 Hz）<br>in-process · Orin</div></div>
-        <div class="stat"><div class="v">71<small>%</small> / 29<small>%</small></div><div class="k">prefix / action expert<br>延迟分解（num_steps=10）</div></div>
+        <div class="stat"><div class="v">41<small>%</small></div><div class="k">Gemma 2B prefill = 最大单块<br>prefix 71% = G2B 210 + SigLIP 100 ms</div></div>
         <div class="stat"><div class="v">减步免费</div><div class="k">num_steps 10→1<br>成功率 99→98%（噪声内）</div></div>
       </div>
 
@@ -117,9 +117,11 @@
         <caption>表 2 · 延迟分解：L(N) = prefix + N × per_step（in-process，每值 N=15，boosted）</caption>
         <tr><th>组件</th><th>是什么</th><th>耗时</th><th>占 L(10)</th></tr>
         <tr><td class="rowh">prefix（跑 1 次）</td><td>SigLIP 图像编码 + Gemma 2B prefill，填 KV cache</td><td class="num"><b>368 ms</b></td><td class="num"><b>71%</b></td></tr>
+        <tr><td class="rowh">├ SigLIP 图像编码</td><td>2×224² RGB → image tokens</td><td class="num">~100 ms</td><td class="num">~19%</td></tr>
+        <tr><td class="rowh">└ Gemma 2B prefill</td><td>读图+文 token、填 KV cache——<b>整次推理的最大单块</b></td><td class="num"><b>~210 ms</b></td><td class="num"><b>~41%</b></td></tr>
         <tr><td class="rowh">per denoising step</td><td>Gemma 300M action expert，flow-matching 去噪（× num_steps）</td><td class="num">14.7 ms/步</td><td class="num">29%（@10 步）</td></tr>
       </table></div>
-      <p class="sec-note">线性度检查：implied per_step = (L(N)−prefix)/N 在 N=1/2/3/5/10 全落在 <b>14.6–14.8 ms</b>（完美线性）⇒ 分解可信。<b>延迟被 backbone prefix 主导（71%）</b>，减 num_steps 只能砍那 29%——num_steps=1 也只到 383 ms（prefix 368 ms 是地板）。</p>
+      <p class="sec-note">线性度检查：implied per_step = (L(N)−prefix)/N 在 N=1/2/3/5/10 全落在 <b>14.6–14.8 ms</b>（完美线性）⇒ 分解可信。<b>延迟被 backbone prefix 主导（71%）</b>，减 num_steps 只能砍那 29%——num_steps=1 也只到 383 ms（prefix 368 ms 是地板）。<b>prefix 细分口径</b>：各阶段单独 JIT 计时（<code>g4_prefix_profile.py</code>，SigLIP 100.3 + Gemma 2B 209.6 ≈ 310 ms 模型前向），对扫描反解的 368 ms 有 ~54 ms 残差 = preprocess（~4 ms）+ 噪声生成 + while_loop 控制 + 「单独 JIT vs 融合 JIT」测量口径差（非模型前向，如实标注）⇒ <b>G5 压延迟第一靶子 = Gemma 2B prefill</b>。</p>
 
       <div class="ds-tablewrap"><table class="ds-table">
         <caption>表 3 · 实时可行性：机器人时间预算 vs 实测延迟（占空比 = L1 / 预算）</caption>
@@ -130,6 +132,7 @@
         <tr><td class="rowh">replan=10 + num_steps=5 + prefetch</td><td class="num">500 ms</td><td>boosted 441</td><td class="num best">88%</td><td class="ctr best">✓ 延迟轴可行</td></tr>
       </table></div>
       <p class="sec-note"><b>🔴 但 prefetch 撞上第二堵墙</b>：推理 ≈ 一个 chunk 执行时间 ⇒ prefetch 必须提前 1 整 chunk 用<b>旧 obs</b> 推理 ⇒ obs 陈旧毁掉成功率（实测同 task/seed：sync replan=10 = <b>6/6</b> vs prefetch replan=10 = <b>0/6</b>）。<b>⇒ Orin 上 π0.5「20 Hz 实时」与「准确」不可兼得</b>：要么 sync（新鲜 obs、准确，但机器人等待 + DVFS 降频、有效 ~9–10 Hz），要么 prefetch（实时可行但 obs 陈旧、成功率崩）。出路只有<b>更快推理压 prefix</b>（把 383 ms 地板再压到 &lt;250 ms，需 TRT/量化）或<b>更低控制频率</b>。</p>
+      <p class="sec-note"><b>实时性的核心不等式</b>：<code>T_infer ≤ H / f_control</code>（一次推理时间 ≤ H 步动作的物理执行时间）——<b>提高控制频率只会让预算 H/f_control 更小、实时更不可行</b>（控制步是机器人物理时间、非计算，动作幅度按 20 Hz 标定）；业界解法（temporal ensembling / 压模型 / 分层解耦控制）详见 <a href="https://github.com/ranpin/pi05-edge/blob/main/docs/REPORT.md" target="_blank" rel="noopener">REPORT.md 讨论节</a>。</p>
       <p class="sec-note"><b>计时口径</b>：L1 不是常数——由 GPU DVFS 主导，分 <b>boosted</b>（背靠背/async prefetch，GPU 持续忙、~1300 MHz，487–515 ms）与 <b>throttled</b>（同步闭环，GPU 两次推理间空转掉到 306 MHz 地板、每次从低频爬坡，570–587 ms）两口径；报任何 L1 必须标明。L3 = LIBERO 期望控制频率 = 20 Hz（源码核实）。<b>诚实边界</b>：单 seed、100 ep（官方 500）、仅 libero_spatial（最易套件，十 task 同质「pick black bowl」）；更难套件（libero_10 官方 92.4、更灵巧）可能对减步更敏感，「减步免费」结论 scope 限本套件。纯仿真、无真机；模型层零贡献（用官方 fine-tuned 权重）。</p>
     </section>
 
@@ -200,8 +203,8 @@
             <rect x="212" y="30" width="198" height="60" rx="8" fill="url(#p5e-g-alt)" stroke="var(--ds-alt)" stroke-width="1.4"/>
             <use class="dg-ico" href="#ico-brain" x="221" y="39" width="14" height="14" style="color:var(--ds-alt)"/>
             <text class="dg-name" x="311" y="56" text-anchor="middle">prefix · 跑 1 次</text>
-            <text class="dg-sub" x="311" y="71" text-anchor="middle">SigLIP 编码 + Gemma 2B prefill</text>
-            <text class="dg-sub" x="311" y="84" text-anchor="middle">368 ms · 占 71%</text>
+            <text class="dg-sub" x="311" y="71" text-anchor="middle">SigLIP 100 + Gemma 2B 210 ms</text>
+            <text class="dg-sub" x="311" y="84" text-anchor="middle">共 368 ms · 占 71%</text>
           </g>
           <g class="dg-node" data-id="p5e-expert" style="--dg-glow:var(--ds-alt);--dg-i:2">
             <rect x="452" y="30" width="208" height="60" rx="8" fill="url(#p5e-g-alt)" stroke="var(--ds-alt)" stroke-width="1.4"/>
@@ -232,10 +235,10 @@
           <span style="--c:var(--ds-warn)"><i></i>硬件执行</span>
         </div>
       </div>
-      <p class="ds-figcap">图 1 · π0.5 两段式推理与控制环：观测 → prefix（SigLIP + Gemma 2B，跑 1 次，368 ms）→ action expert（Gemma 300M，去噪 × num_steps，14.7 ms/步）→ action chunk (10,7) → 机器人执行前 5 步 → replan 回到观测</p>
+      <p class="ds-figcap">图 1 · π0.5 两段式推理与控制环：观测 → prefix（SigLIP ~100 + Gemma 2B prefill ~210 ms，跑 1 次，共 368 ms）→ action expert（Gemma 300M，去噪 × num_steps，14.7 ms/步）→ action chunk (10,7) → 机器人执行前 5 步 → replan 回到观测</p>
 
       <p class="sec-lead"><b>输入 / 输出</b>：系统每次查询吃一帧观测——<code>observation/image</code> (224,224,3) uint8（agentview）+ <code>observation/wrist_image</code> (224,224,3) uint8（腕部）+ <code>observation/state</code> (8,) float（末端位姿 3 + 轴角 3 + 夹爪 2）+ <code>prompt</code> 字符串；吐一个 <code>actions</code> (10, 7) float 动作块（10 步 × 7 维 = 6 DoF 位姿增量 + 夹爪）。原始渲染 256²，client 端 <code>resize_with_pad</code> 到 224 并旋转 180° 以匹配训练预处理。</p>
-      <p class="sec-lead"><b>两段式推理（延迟解剖的对象）</b>：<code>sample_actions</code> 先跑 <b>prefix 一次</b>（SigLIP 图像编码 + Gemma 2B prefill，填 KV cache，368 ms），再跑 <b>去噪循环 num_steps 次</b>（Gemma 300M action expert 沿 flow-matching ODE 从噪声积分到动作，每步 14.7 ms）。故 <code>L(N) = prefix + N × per_step</code>——prefix 是地板（71%），减 num_steps 只动那 29%。num_steps 是 <code>sample_actions</code> 的关键字参数，经 <code>policy._sample_kwargs</code> 注入，<b>无需改 openpi 源码</b>即可扫描。</p>
+      <p class="sec-lead"><b>两段式推理（延迟解剖的对象）</b>：<code>sample_actions</code> 先跑 <b>prefix 一次</b>（SigLIP 图像编码 + Gemma 2B prefill，填 KV cache，368 ms），再跑 <b>去噪循环 num_steps 次</b>（Gemma 300M action expert 沿 flow-matching ODE 从噪声积分到动作，每步 14.7 ms）。故 <code>L(N) = prefix + N × per_step</code>——prefix 是地板（71%），减 num_steps 只动那 29%。prefix 再拆一层：<b>SigLIP ~100 ms + Gemma 2B prefill ~210 ms——Gemma 2B prefill 是整次推理的最大单块（41%）</b>，是 G5 压缩的第一靶子。num_steps 是 <code>sample_actions</code> 的关键字参数，经 <code>policy._sample_kwargs</code> 注入，<b>无需改 openpi 源码</b>即可扫描。</p>
       <p class="sec-note"><b>部署</b>：openpi 源码 @ <code>215abfb</code> + jetson-containers 29 包链 → 自包含镜像（33.9 GB，jax 0.5.3 + <code>XLA_FLAGS</code> 已烘焙，绕开 Tegra sm_87 的 GemmFusionAutotuner 崩溃）。client 端<b>不装 torch</b>——LIBERO 的 <code>.pruned_init</code> 是 torch.save 的 ZIP 壳但 payload 是纯 numpy pickle，用 zip+pickle 直读即可，守住仿真机 pin 死的 numpy 1.22.4 栈。完整方法学（来源/版本/口径/复现命令）见 <a href="https://github.com/ranpin/pi05-edge/blob/main/docs/METHODOLOGY.md" target="_blank" rel="noopener">METHODOLOGY.md</a>，结果与讨论见 <a href="https://github.com/ranpin/pi05-edge/blob/main/docs/REPORT.md" target="_blank" rel="noopener">REPORT.md</a>，踩坑见 <a href="https://github.com/ranpin/pi05-edge/blob/main/docs/PROBLEMS.md" target="_blank" rel="noopener">PROBLEMS.md</a>。</p>
     </section>
 
