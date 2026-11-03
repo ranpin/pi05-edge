@@ -133,6 +133,26 @@ docker run --rm --runtime nvidia \
 
 复现命令同 §3.1（把 `g2_verify.py` 换成 `g4_profile.py`）。**须先停掉 websocket server**（`docker stop g3_policy_server`）释放 GPU，避免 2 份模型（~22GB）挤 32GB 统一内存 + 争用污染计时。结果见 [REPORT.md 表 4](REPORT.md)。
 
+### 3.4 G4 · quality 轴（成功率 vs num_steps，闭环）
+
+延迟轴（§3.3）回答「减 num_steps 能省多少」，quality 轴回答「省了会不会掉成功率」。server 端 `scripts/orin/serve_policy_numsteps.py`（改自 openpi `serve_policy.py`：`create_trained_policy` 后注入 `policy._sample_kwargs["num_steps"]=N`，暴露成 `--num_steps` 参数，无需改 openpi 源码；num_steps 是 JIT 静态整数，改值须重启 server）；client 端 `scripts/sim/eval_libero_bridge.py`（官方协议 `replan_steps=5`、sync、`--num_trials_per_task 10` 缩减到 100 ep，隔离 num_steps 为唯一变量）。
+
+复现（server 在 Orin、client 在仿真机，仿真机用 §1.4 的 venv）：
+
+```bash
+# Orin：起 num_steps=N 的 server
+docker run -d --name g4_quality_server --runtime nvidia \
+  -e NVIDIA_VISIBLE_DEVICES=all -e NVIDIA_DRIVER_CAPABILITIES=all -e OPENPI_DATA_HOME=/openpi_cache \
+  -v <orin-workdir>/serve_policy_numsteps.py:/serve_policy_numsteps.py:ro \
+  -v <orin-workdir>/openpi_cache:/openpi_cache -p 8000:8000 \
+  openpi:r36.4.tegra-aarch64-cu126-22.04-openpi python3 /serve_policy_numsteps.py --num_steps N
+# 仿真机：跑 100 ep 评测（osmesa 离屏渲染）
+MUJOCO_GL=osmesa python eval_libero_bridge.py --host <ORIN_IP> --replan_steps 5 \
+  --num_trials_per_task 10 --task_suite_name libero_spatial --results_out g4_quality_nsN.jsonl
+```
+
+原始结果入库 `results/g4_quality/`（三份 JSONL，各 100 ep + SUMMARY）。结果见 [REPORT.md 表 5](REPORT.md)。
+
 ## 4. 官方 eval 协议（G3 必须照此复现）
 
 源码位置：`/opt/openpi/examples/libero/main.py`（镜像内）。关键参数与行号见 [REPORT.md 的协议表](REPORT.md#官方-eval-协议源码核实行号可查)。复现要点：

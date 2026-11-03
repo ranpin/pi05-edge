@@ -2,7 +2,7 @@
 
 > **呈现主页面**。方法与可复现细节见 [METHODOLOGY.md](METHODOLOGY.md)，全流程踩坑见 [PROBLEMS.md](PROBLEMS.md)。
 >
-> **状态**：G1 / G2 已完成并有实测数据；**G3 桥接闭环冒烟通过（2/2）+ Top2 async prefetch 墙已实测**；**G4 延迟分解已实测（prefix 71% / action expert 29%，num_steps 扫描）**；G3 全量成功率评测、G4 quality 轴、G5 待做。本页只写**已实测**或**已从源码核实**的内容；推导值与未测项均显式标注。
+> **状态**：G1 / G2 已完成并有实测数据；**G3 桥接闭环冒烟通过（2/2）+ Top2 async prefetch 墙已实测**；**G4 延迟分解 + quality 轴均已实测（prefix 71% / action expert 29%；num_steps 10/5/1 = 99/100/98%，减步免费）**；G3 全量成功率评测、G5 待做。本页只写**已实测**或**已从源码核实**的内容；推导值与未测项均显式标注。
 
 ## 摘要
 
@@ -10,7 +10,7 @@
 
 头条结果（实测）：π0.5 在 Orin 上的纯推理延迟 **L1 = 487.7 ms（2.05 Hz）**，输出 action chunk 形状 `(10, 7)`。结合从 openpi / LIBERO 源码核实的官方评测协议——**控制频率 20 Hz、每 5 步重规划（`replan_steps=5`）**——可算出每次策略查询只有 **250 ms** 的机器人时间预算，而实测推理要 ~490 ms，**超支 1.96×**，真机上只能产出 ~10.2 Hz 的动作流。
 
-但 `replan_steps` 这个**纯编排旋钮**（零模型改动、零重训）调到 10 后，G3 闭环实测却推翻了「实时可行」的乐观推算：**L1 不是常数**——由 GPU DVFS 主导，同步闭环里 GPU 在两次推理间空转掉频，L1 从背靠背 ~504 ms 升到 ~587 ms ⇒ replan=10 同步占空比 **117% 超支**；只有 async prefetch 让 GPU 持续忙才拉回 ~101%（贴边）。**而 prefetch 又撞上第二堵墙**：推理 ~504 ms ≈ 一个 chunk 执行时间 500 ms，prefetch 必须提前 1 整 chunk 用旧 obs 推理 ⇒ obs 陈旧毁掉成功率（实测 sync replan=10 = 6/6 vs prefetch replan=10 = 0/6）。**⇒ Orin 上 π0.5「20 Hz 实时」与「准确」不可兼得**，出路只有更快推理或更低控制频率。**G4 延迟分解进一步定位了「更快推理」的靶子**：504 ms 里 **prefix（SigLIP 图像编码 + Gemma 2B prefill）占 71%（368 ms）、flow-matching action expert 只占 29%（14.7 ms/去噪步）**——把 num_steps 从 10 减到 1 也只到 383 ms（prefix 是地板），**要压到 <250 ms 必须动 prefix（G5 TRT/量化），减 num_steps 必要但不充分**。同时，LIBERO 官方 eval 循环**没有任何实时 pacing**，因此 **benchmark 成功率与推理延迟是两条独立的轴**——「复现官方成功率」与「实时可行性」必须分开报告，不能混成一个 Hz 数字。
+但 `replan_steps` 这个**纯编排旋钮**（零模型改动、零重训）调到 10 后，G3 闭环实测却推翻了「实时可行」的乐观推算：**L1 不是常数**——由 GPU DVFS 主导，同步闭环里 GPU 在两次推理间空转掉频，L1 从背靠背 ~504 ms 升到 ~587 ms ⇒ replan=10 同步占空比 **117% 超支**；只有 async prefetch 让 GPU 持续忙才拉回 ~101%（贴边）。**而 prefetch 又撞上第二堵墙**：推理 ~504 ms ≈ 一个 chunk 执行时间 500 ms，prefetch 必须提前 1 整 chunk 用旧 obs 推理 ⇒ obs 陈旧毁掉成功率（实测 sync replan=10 = 6/6 vs prefetch replan=10 = 0/6）。**⇒ Orin 上 π0.5「20 Hz 实时」与「准确」不可兼得**，出路只有更快推理或更低控制频率。**G4 延迟分解进一步定位了「更快推理」的靶子**：504 ms 里 **prefix（SigLIP 图像编码 + Gemma 2B prefill）占 71%（368 ms）、flow-matching action expert 只占 29%（14.7 ms/去噪步）**——把 num_steps 从 10 减到 1 也只到 383 ms（prefix 是地板），**要压到 <250 ms 必须动 prefix（G5 TRT/量化），减 num_steps 必要但不充分**。**G4 quality 轴闭环实测坐实了另一半**：libero_spatial 上 num_steps 从 10→5→1 减，成功率 99%/100%/98%（全在 100 ep 噪声内）——**减步基本免费**（与近 rectified flow 一致），但 num_steps=1 仍 383 ms 跨不过 250 ms 预算，**prefix 地板才是那堵墙不可动的根**。同时，LIBERO 官方 eval 循环**没有任何实时 pacing**，因此 **benchmark 成功率与推理延迟是两条独立的轴**——「复现官方成功率」与「实时可行性」必须分开报告，不能混成一个 Hz 数字。
 
 **诚实定位**：不训练、不微调（微调在后期 Kaggle 阶段，且必须服务部署主线）；纯仿真、无真机；主交付物 = **Orin 性能解剖 + action-chunk 调度层**，TRT / 量化是加分项。
 
@@ -26,6 +26,7 @@
 | DVFS 核实 | 闭环 L1（587ms）为何高于 G2 in-process（490ms）？ | 变调用间隔复测 + 直接采 GPU 频率 | **GPU DVFS**：空闲 306MHz↔boost 1300MHz；L1 随间隔 504→569ms | 同步闭环该用 throttled L1 |
 | Top2 prefetch | async prefetch 能救回实时性吗？ | sync vs prefetch 各 6 ep 对照（同 task/seed） | **prefetch 墙**：obs 陈旧 1 chunk ⇒ 0/6 失败（sync 6/6）；实时与准确不可兼得 | 出路=更快推理（G4/G5） |
 | G4 | 延迟花在哪？ | num_steps 扫描（in-process，每值 N=15）+ 延迟分解 | ✅ **prefix（SigLIP+Gemma2B）368ms=71% vs action expert 14.7ms/步=29%**，线性度完美（implied per_step 14.6-14.8） | num_steps→1 也只到 383ms（prefix 是地板）⇒ 破墙须压 prefix |
+| G4 quality 轴 | 减 num_steps 会伤成功率吗？ | 闭环 num_steps=10/5/1 各 100 ep（replan=5、sync、seed 7） | ✅ **99/100/98%，全在噪声内 ⇒ 减步基本免费**（与 rectified flow 一致）；throttled L1 585→517→458 交叉验证分解 | 地板 383ms 仍 >250ms 预算 ⇒ prefix 是墙根 |
 | G5 | 能否压 prefix（368ms 地板）？ | TRT / 量化导出尝试 | 🔜 加分项；**G4 已定位 prefix=71% 是靶子**；不通则写成墙结论 | — |
 
 > **地图 1（结构图 + 模块级资源账）** 随 G4 性能解剖产出后补入本节之前——现在还没有模块级实测数据，不预先画。
@@ -115,6 +116,20 @@ gap=1.0 探针期间并发采 GPU `cur_freq`（80 样本）：**17 @ 306 MHz（�
 
 ⚠️ L(10)=515.2 ms 比 G2 的 487.7 ms 高 ~5%（运行间 DVFS/热态波动，boosted 区间实测 487–515）；分解是 within-run 差值，不受绝对偏移影响，完美线性度佐证其稳健。
 
+### 表 5 · G4 quality 轴：成功率 vs num_steps（闭环，libero_spatial，每值 100 ep，replan_steps=5，sync，seed 7）
+
+与表 4（延迟轴）同一 Pareto 的另一半——**减 num_steps 会不会伤成功率？** server 端用 `serve_policy_numsteps.py` 注入 num_steps（`create_trained_policy` 后设 `policy._sample_kwargs["num_steps"]=N`，无需改 openpi 源码）；client 跑 `eval_libero_bridge.py`（官方协议 `replan_steps=5`、sync、隔离 num_steps 为唯一变量）。
+
+| num_steps | 成功率 | misses | server_L1 (throttled) | L2 | boosted L1（表 4） |
+|---|---|---|---|---|---|
+| 10（默认） | 99/100 = 99% | task9 ×1 | 585 ms | 593 ms | 515 ms |
+| 5 | 100/100 = 100% | 无 | 517 ms | 524 ms | 441 ms |
+| 1（地板） | 98/100 = 98% | task4 ×1, task7 ×1 | 458 ms | 465 ms | 383 ms |
+
+**结果**：三档全落在 98–100%（100 ep 二项噪声内），misses 均为**分散的单 ep 噪声**（ns=10 掉 task9、ns=1 掉 task4+7、ns=5 全清，不集中在某难 task）⇒ **在 libero_spatial 上把 num_steps 从 10 减到 1 基本免费（无可测成功率损失）**。
+**分析**：① 与 π0.5 用（近）**rectified flow** 一致——流路径近似直线，单步 Euler 积分即够，无需多步去噪。② 闭环 throttled L1（585→517→458）与表 4 boosted L1（515→441→383）都随 num_steps 线性下降（每步 ~14.7 ms），**第三次交叉验证延迟分解**（也坐实 server 确实用了所配的 num_steps）。③ **但不改变 prefetch 墙结论**：num_steps=1 boosted 仍 383 ms > 250 ms 预算（replan=5），**prefix 地板 368 ms 是墙的根，破墙须 G5 压 prefix**——减步免费却到不了 250 ms 以下。
+**诚实边界**：单 seed（7）、100 ep（官方 500）、仅 libero_spatial（最易套件，十 task 同质「pick up black bowl + place on plate」）；**更难的套件（如 libero_10 官方 92.4、更灵巧）可能对减步更敏感**，「免费」结论 scope 限 libero_spatial，跨套件泛化待测。原始数据入库 `results/g4_quality/`（三份 JSONL，各 100 ep + SUMMARY）。
+
 ## 方法
 
 ### I/O 三层次（分清这三层是讲清项目的前提）
@@ -192,7 +207,7 @@ gap=1.0 探针期间并发采 GPU `cur_freq`（80 样本）：**17 @ 306 MHz（�
 ### 待办
 
 - **G3 全量**：`libero_spatial` 500 episode 复现官方 98.8（≈3.5–5 h Orin 时间），记差值、分歧定位到层。（桥接冒烟 + L2 已完成：L2−L1 ≈ 7 ms。）
-- **G4（主交付物）**：✅ **延迟分解已实测**（表 4：prefix 368ms=71% / action expert 14.7ms/步=29%，线性度完美；num_steps→1 地板 383ms）。**待做 quality 轴**：成功率 vs num_steps（闭环，需能配 num_steps 的 server）——验证 num_steps=5（replan=10 占空比 88%）能否保住成功率，以及 prefix 地板（368ms）是否注定 prefetch 陈旧不可接受。统一内存 roofline 可选。
+- **G4（主交付物）**：✅ **延迟分解 + quality 轴均已实测**。延迟分解（表 4）：prefix 368ms=71% / action expert 14.7ms/步=29%，num_steps→1 地板 383ms。quality 轴（表 5）：闭环 num_steps=10/5/1 各 100 ep = 99/100/98% ⇒ **减步基本免费**（与 rectified flow 一致），但地板 383ms 仍 > 250ms 预算 ⇒ prefix 是墙根、破墙须 G5。统一内存 roofline 可选。
 - **Top2 续**：prefetch 墙已实测（sync 6/6 vs prefetch 0/6）；可再探更聪明方案（temporal ensembling / obs 预测）能否缓解陈旧，但机制上「推理≈chunk 时长 ⇒ 必陈旧 1 chunk」是硬约束。
 - **G5**：TRT / 量化（加分项；不通就写成「flow-matching VLA 在 TRT 10.7 / sm_87 的导出障碍是 X」这类墙结论）。
 - **demo 页**：G4 + G3 全量出结果后做（需 rollout 视频 + 性能解剖 + 成功率）。
