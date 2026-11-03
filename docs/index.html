@@ -1,0 +1,246 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>π0.5 在 Jetson Orin 上的部署与实时性解剖 · pi05-edge</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🦾</text></svg>">
+<!-- 共享演示页外壳（配色/页头/章节/三线表/科研插图/明暗主题，单一事实源在主站 public/demo-shell.css） -->
+<link rel="stylesheet" href="https://ranpin.github.io/demo-shell.css">
+<script src="https://ranpin.github.io/theme.js"></script>
+<meta property="og:title" content="π0.5 在 Jetson Orin 上的部署与实时性解剖">
+<meta property="og:description" content="Physical Intelligence π0.5（openpi pi05_libero）在 Jetson AGX Orin 上从源码现场构建、LIBERO 闭环评测与性能解剖：纯推理 487.7ms/2.05Hz，prefix 占 71%，减 num_steps 免费，但「20Hz 实时」与「准确」不可兼得。">
+<meta property="og:url" content="https://ranpin.github.io/pi05-edge/">
+<meta property="og:type" content="website">
+<meta property="og:image" content="https://ranpin.github.io/pi05-edge/assets/og-image.png">
+<meta name="twitter:card" content="summary_large_image">
+<style>
+  /* 页面专属视觉；结构色一律引用外壳 --ds-* 变量，不写死 hex（明暗双主题都要成立） */
+  .sec-lead{color:var(--ds-muted); font-size:13.5px; margin:0 0 16px; line-height:1.65;}
+  .sec-lead a{color:var(--ds-accent);}
+  .sec-note{color:var(--ds-muted); font-size:12.5px; margin-top:12px; line-height:1.65;}
+  .sec-note a{color:var(--ds-accent);}
+  .sub{font-size:1rem; font-weight:700; color:var(--ds-text); margin:24px 0 2px; text-indent:0;}
+  code{background:var(--ds-code-bg); border:1px solid var(--ds-border); border-radius:5px; padding:1px 6px; font-family:var(--ds-mono); font-size:12.5px; color:var(--ds-accent-strong);}
+
+  .stats{display:grid; grid-template-columns:repeat(4,1fr); gap:12px; margin:4px 0 18px;}
+  @media (max-width:720px){.stats{grid-template-columns:repeat(2,1fr);}}
+  .stat{background:var(--ds-panel); border:1px solid var(--ds-border); border-radius:var(--ds-radius); padding:16px 14px; text-align:center;}
+  .stat .v{font-size:23px; font-weight:700; color:var(--ds-accent); line-height:1.15; font-variant-numeric:tabular-nums;}
+  .stat .v small{font-size:13px; font-weight:600;}
+  .stat .k{font-size:12px; color:var(--ds-muted); margin-top:6px; line-height:1.45;}
+
+  /* 演示：任务说明 + rollout 视频网格 */
+  .p5e-task{background:var(--ds-panel); border:1px solid var(--ds-border); border-radius:var(--ds-radius); padding:.75rem 1rem; margin:0 0 1rem;}
+  .p5e-task p{margin:.4rem 0;}
+  .p5e-warn{border-left:3px solid var(--ds-warn); background:var(--ds-warn-soft); padding:.6rem 1rem; border-radius:0 6px 6px 0; margin:.6rem 0;}
+  .p5e-vgrid{display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:18px 16px; max-width:760px; margin:10px auto 4px;}
+  @media (max-width:680px){.p5e-vgrid{grid-template-columns:1fr; max-width:340px;}}
+  .p5e-vcard figure{margin:0; text-align:center;}
+  .p5e-vcard video{width:100%; max-width:340px; aspect-ratio:1/1; object-fit:contain; border-radius:10px; border:1px solid var(--ds-border); box-shadow:0 2px 14px rgba(0,0,0,.10); background:#000;}
+  .p5e-vcap{font-size:12.5px; color:var(--ds-muted); margin-top:7px; line-height:1.5; text-align:center;}
+  .p5e-vcap b{color:var(--ds-text);}
+  .p5e-ok{color:var(--ds-ok); font-weight:700;}
+  .demo-note{color:var(--ds-muted); font-size:12.5px; margin-top:14px; line-height:1.65;}
+
+  .ds-table .num{text-align:right; font-variant-numeric:tabular-nums;}
+  .ds-table .ctr{text-align:center;}
+  .best{color:var(--ds-ok); font-weight:700;}
+  .bad{color:var(--ds-danger); font-weight:700;}
+</style>
+</head>
+<body>
+  <header class="ds-header">
+    <div class="ds-header__inner">
+      <div class="ds-header__row">
+        <a class="ds-home" href="https://ranpin.github.io/">← 返回主页</a>
+        <h1>π0.5 在 Jetson Orin 上的部署与实时性解剖</h1>
+        <button class="ds-theme-btn" type="button" onclick="toggleTheme()" aria-label="切换明暗主题"><span class="ds-theme-icon">🌙</span></button>
+      </div>
+      <p class="ds-header__sub">pi05-edge · Physical Intelligence π0.5（openpi <code>pi05_libero</code>）→ Jetson AGX Orin · LIBERO 闭环评测 + 性能解剖</p>
+    </div>
+  </header>
+
+  <div class="ds-wrap">
+    <!-- ============ 演示 ============ -->
+    <section class="ds-section" id="demo">
+      <h2 class="ds-h2">演示</h2>
+      <div class="p5e-task">
+        <p><b>任务 · LIBERO spatial</b>：Franka 机械臂把<b>桌上的黑碗</b>拿起、放到盘子上（十个任务只是碗的初始位置不同——盘与ramekin之间、桌面中央、饼干盒上、ramekin 上等）。每段视频是一个完整回合：策略看一帧观测 → 输出 10 步动作 → 执行前 5 步 → 重规划，直到成功或超步数。</p>
+        <p><b>形态 · 跨机桥接</b>：π0.5 策略跑在 <b>Jetson AGX Orin</b>（websocket server），LIBERO 仿真跑在另一台机器（client），二者用 openpi 官方的 client/server 协议对接——这正是上游 <code>examples/libero</code> 的架构，只是拆到两台物理机。</p>
+      </div>
+      <p class="p5e-warn">⚠ 画面是<b>模型看到的 agentview</b>（已按训练预处理旋转 180°），非人眼原始渲染；以 <b>20 Hz 控制节奏</b>播放（1 帧 = 1 个控制步 = 50 ms 机器人时间）。LIBERO 官方评测循环<b>没有实时 pacing</b>，故<b>成功率与推理延迟是两条独立的轴</b>——视频展示「策略能否完成任务」，延迟/实时性见「评测结果」。</p>
+
+      <div class="p5e-vgrid">
+        <div class="p5e-vcard"><figure>
+          <video controls preload="metadata" src="assets/rollout_t0e0.mp4"></video>
+          <figcaption class="p5e-vcap"><b>task 0</b> · 碗在盘与 ramekin 之间<br><span class="p5e-ok">✓ 成功</span> · 113 步</figcaption>
+        </figure></div>
+        <div class="p5e-vcard"><figure>
+          <video controls preload="metadata" src="assets/rollout_t2e0.mp4"></video>
+          <figcaption class="p5e-vcap"><b>task 2</b> · 碗在桌面中央<br><span class="p5e-ok">✓ 成功</span> · 135 步</figcaption>
+        </figure></div>
+        <div class="p5e-vcard"><figure>
+          <video controls preload="metadata" src="assets/rollout_t3e0.mp4"></video>
+          <figcaption class="p5e-vcap"><b>task 3</b> · 碗在饼干盒上<br><span class="p5e-ok">✓ 成功</span> · 100 步</figcaption>
+        </figure></div>
+        <div class="p5e-vcard"><figure>
+          <video controls preload="metadata" src="assets/rollout_t5e0.mp4"></video>
+          <figcaption class="p5e-vcap"><b>task 5</b> · 碗在 ramekin 上<br><span class="p5e-ok">✓ 成功</span> · 122 步</figcaption>
+        </figure></div>
+      </div>
+      <p class="demo-note">四段均为 <b>num_steps=10（官方默认）</b>下的成功回合，取自本次 demo 录像跑（seed 7、固定初始状态，与「评测结果」表 2 同一 server 配置）。完整逐 task 成功率见评测结果；更多任务的 rollout 见仓库 <code>results/</code>。</p>
+    </section>
+
+    <!-- ============ 评测结果 ============ -->
+    <section class="ds-section" id="results">
+      <h2 class="ds-h2">评测结果</h2>
+      <p class="sec-lead"><b>测试数据集与协议</b>：LIBERO <b>spatial</b> 套件（10 个任务，每配置 10 task × 10 trial = <b>100 episode</b>，一 trial 一固定初始状态，seed 7），照 openpi 官方 <code>examples/libero</code> 协议——<code>replan_steps=5</code>、20 Hz 控制、成功判据 = 环境返回的 <code>done</code>。延迟在 Orin 上测两口径：<b>L1</b> = 本地纯推理墙钟（in-process，不含网络），<b>L2</b> = obs→Orin→action 端到端往返（跨机 websocket，client 侧计时）。官方报告值 spatial = <b>98.8</b>（500 ep）；本页 100 ep 为缩减样本，是<b>校准</b>（证明 harness 正确）而非超越。</p>
+
+      <div class="stats">
+        <div class="stat"><div class="v">99<small>%</small></div><div class="k">成功率 @ num_steps=10<br>100 ep · 官方报告 98.8</div></div>
+        <div class="stat"><div class="v">487.7<small>ms</small></div><div class="k">L1 纯推理（2.05 Hz）<br>in-process · Orin</div></div>
+        <div class="stat"><div class="v">71<small>%</small> / 29<small>%</small></div><div class="k">prefix / action expert<br>延迟分解（num_steps=10）</div></div>
+        <div class="stat"><div class="v">减步免费</div><div class="k">num_steps 10→1<br>成功率 99→98%（噪声内）</div></div>
+      </div>
+
+      <div class="ds-tablewrap"><table class="ds-table">
+        <caption>表 1 · num_steps 扫描：延迟轴（in-process boosted）× quality 轴（闭环 100 ep）</caption>
+        <tr><th>num_steps</th><th>成功率（100 ep）</th><th>misses</th><th>boosted L1</th><th>throttled L1（闭环）</th><th>L2（端到端）</th></tr>
+        <tr><td class="rowh">10（默认）</td><td class="ctr">99/100 = 99%</td><td class="ctr">task9 ×1</td><td class="num">515 ms</td><td class="num">585 ms</td><td class="num">593 ms</td></tr>
+        <tr><td class="rowh">5</td><td class="ctr"><span class="best">100/100 = 100%</span></td><td class="ctr">无</td><td class="num">441 ms</td><td class="num">517 ms</td><td class="num">524 ms</td></tr>
+        <tr><td class="rowh">1（地板）</td><td class="ctr">98/100 = 98%</td><td class="ctr">task4 ×1, task7 ×1</td><td class="num">383 ms</td><td class="num">458 ms</td><td class="num">465 ms</td></tr>
+      </table></div>
+      <p class="sec-note"><b>结论：在 libero_spatial 上把去噪步数从 10 减到 1 基本免费</b>——三档成功率全落在 98–100%（100 ep 二项噪声内），misses 是分散的单 ep 噪声（不集中在某难 task），与 π0.5 用（近）<b>rectified flow</b>（流路径近似直线、单步 Euler 积分即够）一致。延迟随 num_steps 线性下降（每步 ~14.7 ms），boosted 与 throttled 两口径同步，<b>交叉验证了下面的延迟分解</b>。</p>
+
+      <div class="ds-tablewrap"><table class="ds-table">
+        <caption>表 2 · 延迟分解：L(N) = prefix + N × per_step（in-process，每值 N=15，boosted）</caption>
+        <tr><th>组件</th><th>是什么</th><th>耗时</th><th>占 L(10)</th></tr>
+        <tr><td class="rowh">prefix（跑 1 次）</td><td>SigLIP 图像编码 + Gemma 2B prefill，填 KV cache</td><td class="num"><b>368 ms</b></td><td class="num"><b>71%</b></td></tr>
+        <tr><td class="rowh">per denoising step</td><td>Gemma 300M action expert，flow-matching 去噪（× num_steps）</td><td class="num">14.7 ms/步</td><td class="num">29%（@10 步）</td></tr>
+      </table></div>
+      <p class="sec-note">线性度检查：implied per_step = (L(N)−prefix)/N 在 N=1/2/3/5/10 全落在 <b>14.6–14.8 ms</b>（完美线性）⇒ 分解可信。<b>延迟被 backbone prefix 主导（71%）</b>，减 num_steps 只能砍那 29%——num_steps=1 也只到 383 ms（prefix 368 ms 是地板）。</p>
+
+      <div class="ds-tablewrap"><table class="ds-table">
+        <caption>表 3 · 实时可行性：机器人时间预算 vs 实测延迟（占空比 = L1 / 预算）</caption>
+        <tr><th>配置</th><th>预算</th><th>用哪个 L1</th><th>占空比</th><th>20 Hz 实时？</th></tr>
+        <tr><td class="rowh">官方 replan=5（同步）</td><td class="num">250 ms</td><td>throttled 585</td><td class="num bad">235%</td><td class="ctr bad">✗ 远超</td></tr>
+        <tr><td class="rowh">replan=10（同步）</td><td class="num">500 ms</td><td>throttled 585</td><td class="num bad">117%</td><td class="ctr bad">✗ 超支</td></tr>
+        <tr><td class="rowh">replan=10 + async prefetch</td><td class="num">500 ms</td><td>boosted 504</td><td class="num">~101%</td><td class="ctr">⚠ 贴边</td></tr>
+        <tr><td class="rowh">replan=10 + num_steps=5 + prefetch</td><td class="num">500 ms</td><td>boosted 441</td><td class="num best">88%</td><td class="ctr best">✓ 延迟轴可行</td></tr>
+      </table></div>
+      <p class="sec-note"><b>🔴 但 prefetch 撞上第二堵墙</b>：推理 ≈ 一个 chunk 执行时间 ⇒ prefetch 必须提前 1 整 chunk 用<b>旧 obs</b> 推理 ⇒ obs 陈旧毁掉成功率（实测同 task/seed：sync replan=10 = <b>6/6</b> vs prefetch replan=10 = <b>0/6</b>）。<b>⇒ Orin 上 π0.5「20 Hz 实时」与「准确」不可兼得</b>：要么 sync（新鲜 obs、准确，但机器人等待 + DVFS 降频、有效 ~9–10 Hz），要么 prefetch（实时可行但 obs 陈旧、成功率崩）。出路只有<b>更快推理压 prefix</b>（把 383 ms 地板再压到 &lt;250 ms，需 TRT/量化）或<b>更低控制频率</b>。</p>
+      <p class="sec-note"><b>计时口径</b>：L1 不是常数——由 GPU DVFS 主导，分 <b>boosted</b>（背靠背/async prefetch，GPU 持续忙、~1300 MHz，487–515 ms）与 <b>throttled</b>（同步闭环，GPU 两次推理间空转掉到 306 MHz 地板、每次从低频爬坡，570–587 ms）两口径；报任何 L1 必须标明。L3 = LIBERO 期望控制频率 = 20 Hz（源码核实）。<b>诚实边界</b>：单 seed、100 ep（官方 500）、仅 libero_spatial（最易套件，十 task 同质「pick black bowl」）；更难套件（libero_10 官方 92.4、更灵巧）可能对减步更敏感，「减步免费」结论 scope 限本套件。纯仿真、无真机；模型层零贡献（用官方 fine-tuned 权重）。</p>
+    </section>
+
+    <!-- ============ 核心方法 ============ -->
+    <section class="ds-section" id="method">
+      <h2 class="ds-h2">核心方法</h2>
+      <div class="ds-dgwrap">
+        <svg class="ds-dg" viewBox="0 0 1000 178" role="img" aria-label="π0.5 推理与控制环（动态图）：数据包沿 观测 → prefix（SigLIP+Gemma 2B）→ action expert 去噪 ×N → action chunk → 机器人执行 穿行，经 replan 虚线回到观测；prefix 与 expert 节点按延迟占比标注">
+          <defs>
+            <marker id="p5e-dg-arr" markerWidth="9" markerHeight="7" refX="8" refY="3.5" orient="auto">
+              <polygon points="0 0, 9 3.5, 0 7" fill="var(--ds-faint)"/>
+            </marker>
+            <linearGradient id="p5e-g-accent" class="dg-grad" data-c="accent" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0" stop-color="var(--ds-accent-soft)"/><stop offset="1" stop-color="var(--ds-accent-soft)"/>
+            </linearGradient>
+            <linearGradient id="p5e-g-alt" class="dg-grad" data-c="alt" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0" stop-color="var(--ds-alt-soft)"/><stop offset="1" stop-color="var(--ds-alt-soft)"/>
+            </linearGradient>
+            <linearGradient id="p5e-g-ok" class="dg-grad" data-c="ok" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0" stop-color="var(--ds-ok-soft)"/><stop offset="1" stop-color="var(--ds-ok-soft)"/>
+            </linearGradient>
+            <linearGradient id="p5e-g-warn" class="dg-grad" data-c="warn" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0" stop-color="var(--ds-warn-soft)"/><stop offset="1" stop-color="var(--ds-warn-soft)"/>
+            </linearGradient>
+            <symbol id="ico-eye" viewBox="0 0 24 24"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7z"/><circle cx="12" cy="12" r="3"/></symbol>
+            <symbol id="ico-brain" viewBox="0 0 24 24"><path d="M9 3a3 3 0 0 0-3 3 3 3 0 0 0-2 5 3 3 0 0 0 1 5 3 3 0 0 0 4 3 3 3 0 0 0 3-3V6a3 3 0 0 0-3-3z"/><path d="M15 3a3 3 0 0 1 3 3 3 3 0 0 1 2 5 3 3 0 0 1-1 5 3 3 0 0 1-4 3 3 3 0 0 1-3-3"/></symbol>
+            <symbol id="ico-loop" viewBox="0 0 24 24"><path d="M4 12a8 8 0 0 1 13-6m3 6a8 8 0 0 1-13 6"/><path d="M17 3v4h-4M7 21v-4h4"/></symbol>
+            <symbol id="ico-actions" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="4" rx="1"/><rect x="3" y="10" width="18" height="4" rx="1"/><rect x="3" y="16" width="18" height="4" rx="1"/></symbol>
+            <symbol id="ico-arm" viewBox="0 0 24 24"><path d="M4 20h6M7 20V9l5-4 4 3"/><circle cx="7" cy="9" r="2"/><circle cx="12" cy="5" r="2"/><circle cx="16" cy="8" r="2"/></symbol>
+          </defs>
+          <!-- 连线（层序：连线 → 脉冲环 → 数据包 → 节点组） -->
+          <line class="dg-edge" data-from="p5e-obs" data-to="p5e-prefix" x1="176" y1="60" x2="206" y2="60" marker-end="url(#p5e-dg-arr)"/>
+          <line class="dg-edge" data-from="p5e-prefix" data-to="p5e-expert" x1="416" y1="60" x2="446" y2="60" marker-end="url(#p5e-dg-arr)"/>
+          <line class="dg-edge" data-from="p5e-expert" data-to="p5e-chunk" x1="666" y1="60" x2="696" y2="60" marker-end="url(#p5e-dg-arr)"/>
+          <line class="dg-edge" data-from="p5e-chunk" data-to="p5e-exec" x1="826" y1="60" x2="856" y2="60" marker-end="url(#p5e-dg-arr)"/>
+          <!-- replan 反馈边（虚线，从执行绕回观测） -->
+          <path class="dg-edge dg-dash" data-from="p5e-exec" data-to="p5e-obs" d="M921,90 V140 H98 V96" fill="none" marker-end="url(#p5e-dg-arr)"/>
+          <text class="dg-note" x="510" y="156" text-anchor="middle">replan：每执行 5 步（chunk 前 5）回到观测重新查询 · 20 Hz 控制</text>
+          <!-- 脉冲环 -->
+          <rect class="dg-ring" x="22" y="27" width="150" height="66" rx="11" stroke="var(--ds-accent)" opacity="0">
+            <animate attributeName="opacity" values="0;.85;0;0" keyTimes="0;.05;.2;1" dur="6s" begin="indefinite" repeatCount="indefinite"/>
+          </rect>
+          <rect class="dg-ring" x="210" y="27" width="202" height="66" rx="11" stroke="var(--ds-alt)" opacity="0">
+            <animate attributeName="opacity" values="0;0;.85;0;0" keyTimes="0;.26;.31;.50;1" dur="6s" begin="indefinite" repeatCount="indefinite"/>
+          </rect>
+          <rect class="dg-ring" x="450" y="27" width="212" height="66" rx="11" stroke="var(--ds-alt)" opacity="0">
+            <animate attributeName="opacity" values="0;0;.85;0;0" keyTimes="0;.56;.61;.78;1" dur="6s" begin="indefinite" repeatCount="indefinite"/>
+          </rect>
+          <rect class="dg-ring" x="700" y="27" width="122" height="66" rx="11" stroke="var(--ds-ok)" opacity="0">
+            <animate attributeName="opacity" values="0;0;.85;0" keyTimes="0;.84;.89;1" dur="6s" begin="indefinite" repeatCount="indefinite"/>
+          </rect>
+          <!-- 数据包：主链单包 6s 匀速穿行（画在盒子下层，盒间空隙可见） -->
+          <g transform="translate(97,60)"><g class="dg-packet-g" opacity="0">
+            <circle r="8" fill="var(--ds-alt)" opacity=".22"/>
+            <circle r="3.2" fill="var(--ds-alt)"/>
+            <animateMotion dur="6s" begin="indefinite" repeatCount="indefinite" calcMode="linear" path="M0,0 H824"/>
+            <animate attributeName="opacity" from="1" to="1" dur="6s" begin="indefinite" repeatCount="indefinite"/>
+          </g></g>
+          <!-- 五节点主链 -->
+          <g class="dg-node" data-id="p5e-obs" style="--dg-glow:var(--ds-accent);--dg-i:0">
+            <rect x="24" y="30" width="146" height="60" rx="8" fill="url(#p5e-g-accent)" stroke="var(--ds-accent)" stroke-width="1.4"/>
+            <use class="dg-ico" href="#ico-eye" x="33" y="39" width="14" height="14" style="color:var(--ds-accent)"/>
+            <text class="dg-name" x="97" y="56" text-anchor="middle">观测</text>
+            <text class="dg-sub" x="97" y="71" text-anchor="middle">2×224² RGB + 8 维 state</text>
+            <text class="dg-sub" x="97" y="84" text-anchor="middle">+ 语言指令</text>
+          </g>
+          <g class="dg-node" data-id="p5e-prefix" style="--dg-glow:var(--ds-alt);--dg-i:1">
+            <rect x="212" y="30" width="198" height="60" rx="8" fill="url(#p5e-g-alt)" stroke="var(--ds-alt)" stroke-width="1.4"/>
+            <use class="dg-ico" href="#ico-brain" x="221" y="39" width="14" height="14" style="color:var(--ds-alt)"/>
+            <text class="dg-name" x="311" y="56" text-anchor="middle">prefix · 跑 1 次</text>
+            <text class="dg-sub" x="311" y="71" text-anchor="middle">SigLIP 编码 + Gemma 2B prefill</text>
+            <text class="dg-sub" x="311" y="84" text-anchor="middle">368 ms · 占 71%</text>
+          </g>
+          <g class="dg-node" data-id="p5e-expert" style="--dg-glow:var(--ds-alt);--dg-i:2">
+            <rect x="452" y="30" width="208" height="60" rx="8" fill="url(#p5e-g-alt)" stroke="var(--ds-alt)" stroke-width="1.4"/>
+            <use class="dg-ico" href="#ico-loop" x="461" y="39" width="14" height="14" style="color:var(--ds-alt)"/>
+            <text class="dg-name" x="556" y="56" text-anchor="middle">action expert · 去噪 × N</text>
+            <text class="dg-sub" x="556" y="71" text-anchor="middle">Gemma 300M · flow-matching ODE</text>
+            <text class="dg-sub" x="556" y="84" text-anchor="middle">14.7 ms/步 · 占 29%（@10）</text>
+          </g>
+          <g class="dg-node" data-id="p5e-chunk" style="--dg-glow:var(--ds-ok);--dg-i:3">
+            <rect x="702" y="30" width="118" height="60" rx="8" fill="url(#p5e-g-ok)" stroke="var(--ds-ok)" stroke-width="1.4"/>
+            <use class="dg-ico" href="#ico-actions" x="711" y="39" width="14" height="14" style="color:var(--ds-ok)"/>
+            <text class="dg-name" x="761" y="56" text-anchor="middle">action chunk</text>
+            <text class="dg-sub" x="761" y="71" text-anchor="middle">(10, 7)</text>
+            <text class="dg-sub" x="761" y="84" text-anchor="middle">10 步 × 7 维</text>
+          </g>
+          <g class="dg-node" data-id="p5e-exec" style="--dg-glow:var(--ds-warn);--dg-i:4">
+            <rect x="858" y="30" width="126" height="60" rx="8" fill="url(#p5e-g-warn)" stroke="var(--ds-warn)" stroke-width="1.4"/>
+            <use class="dg-ico" href="#ico-arm" x="867" y="39" width="14" height="14" style="color:var(--ds-warn)"/>
+            <text class="dg-name" x="921" y="56" text-anchor="middle">机器人执行</text>
+            <text class="dg-sub" x="921" y="71" text-anchor="middle">取前 5 步 @ 20 Hz</text>
+            <text class="dg-sub" x="921" y="84" text-anchor="middle">250 ms 机器人时间</text>
+          </g>
+        </svg>
+        <div class="dg-legend">
+          <span style="--c:var(--ds-accent)"><i></i>输入 / 观测</span>
+          <span style="--c:var(--ds-alt)"><i></i>模型推理（两段）</span>
+          <span style="--c:var(--ds-ok)"><i></i>输出 / 动作</span>
+          <span style="--c:var(--ds-warn)"><i></i>硬件执行</span>
+        </div>
+      </div>
+      <p class="ds-figcap">图 1 · π0.5 两段式推理与控制环：观测 → prefix（SigLIP + Gemma 2B，跑 1 次，368 ms）→ action expert（Gemma 300M，去噪 × num_steps，14.7 ms/步）→ action chunk (10,7) → 机器人执行前 5 步 → replan 回到观测</p>
+
+      <p class="sec-lead"><b>输入 / 输出</b>：系统每次查询吃一帧观测——<code>observation/image</code> (224,224,3) uint8（agentview）+ <code>observation/wrist_image</code> (224,224,3) uint8（腕部）+ <code>observation/state</code> (8,) float（末端位姿 3 + 轴角 3 + 夹爪 2）+ <code>prompt</code> 字符串；吐一个 <code>actions</code> (10, 7) float 动作块（10 步 × 7 维 = 6 DoF 位姿增量 + 夹爪）。原始渲染 256²，client 端 <code>resize_with_pad</code> 到 224 并旋转 180° 以匹配训练预处理。</p>
+      <p class="sec-lead"><b>两段式推理（延迟解剖的对象）</b>：<code>sample_actions</code> 先跑 <b>prefix 一次</b>（SigLIP 图像编码 + Gemma 2B prefill，填 KV cache，368 ms），再跑 <b>去噪循环 num_steps 次</b>（Gemma 300M action expert 沿 flow-matching ODE 从噪声积分到动作，每步 14.7 ms）。故 <code>L(N) = prefix + N × per_step</code>——prefix 是地板（71%），减 num_steps 只动那 29%。num_steps 是 <code>sample_actions</code> 的关键字参数，经 <code>policy._sample_kwargs</code> 注入，<b>无需改 openpi 源码</b>即可扫描。</p>
+      <p class="sec-note"><b>部署</b>：openpi 源码 @ <code>215abfb</code> + jetson-containers 29 包链 → 自包含镜像（33.9 GB，jax 0.5.3 + <code>XLA_FLAGS</code> 已烘焙，绕开 Tegra sm_87 的 GemmFusionAutotuner 崩溃）。client 端<b>不装 torch</b>——LIBERO 的 <code>.pruned_init</code> 是 torch.save 的 ZIP 壳但 payload 是纯 numpy pickle，用 zip+pickle 直读即可，守住仿真机 pin 死的 numpy 1.22.4 栈。完整方法学（来源/版本/口径/复现命令）见 <a href="https://github.com/ranpin/pi05-edge/blob/main/docs/METHODOLOGY.md" target="_blank" rel="noopener">METHODOLOGY.md</a>，结果与讨论见 <a href="https://github.com/ranpin/pi05-edge/blob/main/docs/REPORT.md" target="_blank" rel="noopener">REPORT.md</a>，踩坑见 <a href="https://github.com/ranpin/pi05-edge/blob/main/docs/PROBLEMS.md" target="_blank" rel="noopener">PROBLEMS.md</a>。</p>
+    </section>
+
+    <footer class="ds-footer">π0.5（openpi <code>pi05_libero</code>，官方 fine-tuned 权重）在 Jetson AGX Orin（JetPack 6.2 / CUDA 12.6 / sm_87）· LIBERO spatial 闭环 · 纯仿真无真机<br>
+      代码、脚本与原始评测数据见 <a href="https://github.com/ranpin/pi05-edge">github.com/ranpin/pi05-edge</a></footer>
+  </div>
+</body>
+</html>
