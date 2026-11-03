@@ -110,6 +110,7 @@ gap=1.0 探针期间并发采 GPU `cur_freq`（80 样本）：**17 @ 306 MHz（�
 - **prefix（SigLIP + Gemma 2B prefill，1 次）= L1 − per_step = 368.0 ms = 71% of L10**
 - action expert @ num_steps=10 = 10 × 14.7 = 147.2 ms = **29% of L10**
 - **线性度检查**：implied per_step = (L(N)−prefix)/N 在 N=1/2/3/5/10 全落在 **14.6–14.8 ms**（完美线性）⇒ 分解可信
+- **prefix 再拆一层**（`g4_prefix_profile.py`，各阶段单独 JIT 计时）：**SigLIP 图像编码（2 图）~100 ms（占 prefix 模型计算 32%）+ Gemma 2B prefill ~210 ms（68%）**，preprocess_observation 仅 ~4 ms ⇒ **prefix 内部由 Gemma 2B prefill 主导（占整次推理 41%），不是 SigLIP**。整次推理（515 ms）全分解 = Gemma 2B prefill 41% + action expert 29% + SigLIP 19% + preprocess/噪声/loop 控制/测量残差 11%。对 368 ms prefix 有 **~54 ms 残差** = 噪声生成 + while_loop 控制 + 「单独 JIT 各阶段 vs sample_actions 整体融合 JIT」的测量口径差（非模型前向，如实标注）。
 
 **结果**：延迟被 **backbone prefix 主导（71%）**，flow-matching action expert 只占 29%。
 **分析**：① 减 num_steps 只能砍那 29%——**num_steps=1 也只到 383 ms**（prefix 368 ms 是地板），仍 > replan=5 的 250 ms 预算（超支 1.53×）。② ⇒ **要打破 prefetch 墙（T_infer < 250 ms / obs 陈旧 < 0.5 chunk），必须压 prefix（SigLIP + Gemma 2B），这正是 G5（TRT/量化）的靶子**；减 num_steps 必要但不充分。③ 延迟轴上一个新操作点：**replan=10 + num_steps=5 → 441 ms < 500 ms 预算 → 占空比 88%**（vs num_steps=10 的 103% 超支），但成功率（num_steps=5 够不够）与 prefetch 陈旧度未知，需 quality 轴闭环实测。
