@@ -101,17 +101,17 @@
         <div class="stat"><div class="v">99<small>%</small></div><div class="k">成功率 @ num_steps=10<br>100 ep · 官方报告 98.8</div></div>
         <div class="stat"><div class="v">487.7<small>ms</small></div><div class="k">L1 纯推理（2.05 Hz）<br>in-process · Orin</div></div>
         <div class="stat"><div class="v">41<small>%</small></div><div class="k">Gemma 2B prefill = 最大单块<br>prefix 71% = G2B 210 + SigLIP 100 ms</div></div>
-        <div class="stat"><div class="v">减步免费</div><div class="k">num_steps 10→1<br>成功率 99→98%（噪声内）</div></div>
+        <div class="stat"><div class="v">无可测损失</div><div class="k">减 num_steps 10→1 · n=100<br>99→98% · 三档 CI 重叠（宽 5–7pp）</div></div>
       </div>
 
       <div class="ds-tablewrap"><table class="ds-table">
-        <caption>表 1 · num_steps 扫描：延迟轴（in-process boosted）× quality 轴（闭环 100 ep）</caption>
-        <tr><th>num_steps</th><th>成功率（100 ep）</th><th>misses</th><th>boosted L1</th><th>throttled L1（闭环）</th><th>L2（端到端）</th></tr>
-        <tr><td class="rowh">10（默认）</td><td class="ctr">99/100 = 99%</td><td class="ctr">task9 ×1</td><td class="num">515 ms</td><td class="num">585 ms</td><td class="num">593 ms</td></tr>
-        <tr><td class="rowh">5</td><td class="ctr"><span class="best">100/100 = 100%</span></td><td class="ctr">无</td><td class="num">441 ms</td><td class="num">517 ms</td><td class="num">524 ms</td></tr>
-        <tr><td class="rowh">1（地板）</td><td class="ctr">98/100 = 98%</td><td class="ctr">task4 ×1, task7 ×1</td><td class="num">383 ms</td><td class="num">458 ms</td><td class="num">465 ms</td></tr>
+        <caption>表 1 · num_steps 扫描：延迟轴（in-process boosted）× quality 轴（闭环 100 ep，95% CI 为 Clopper-Pearson 精确法）</caption>
+        <tr><th>num_steps</th><th>成功率（100 ep）</th><th>95% CI</th><th>misses</th><th>boosted L1</th><th>throttled L1（闭环）</th><th>L2（端到端）</th></tr>
+        <tr><td class="rowh">10（默认）</td><td class="ctr">99/100 = 99%</td><td class="ctr">[94.6, 99.97]</td><td class="ctr">task9 ×1</td><td class="num">515 ms</td><td class="num">585 ms</td><td class="num">593 ms</td></tr>
+        <tr><td class="rowh">5</td><td class="ctr"><span class="best">100/100 = 100%</span></td><td class="ctr">[96.4, 100]</td><td class="ctr">无</td><td class="num">441 ms</td><td class="num">517 ms</td><td class="num">524 ms</td></tr>
+        <tr><td class="rowh">1（地板）</td><td class="ctr">98/100 = 98%</td><td class="ctr">[93.0, 99.76]</td><td class="ctr">task4 ×1, task7 ×1</td><td class="num">383 ms</td><td class="num">458 ms</td><td class="num">465 ms</td></tr>
       </table></div>
-      <p class="sec-note"><b>结论：在 libero_spatial 上把去噪步数从 10 减到 1 基本免费</b>——三档成功率全落在 98–100%（100 ep 二项噪声内），misses 是分散的单 ep 噪声（不集中在某难 task），与 π0.5 用（近）<b>rectified flow</b>（流路径近似直线、单步 Euler 积分即够）一致。延迟随 num_steps 线性下降（每步 ~14.7 ms），boosted 与 throttled 两口径同步，<b>交叉验证了下面的延迟分解</b>。</p>
+      <p class="sec-note"><b>结论：在 libero_spatial 上把去噪步数从 10 减到 1，n=100 下无可测成功率损失</b>——三档 95% CI <b>高度重叠</b>（[94.6,99.97] / [96.4,100] / [93.0,99.76]），misses 是分散的单 ep 噪声（不集中在某难 task），与 π0.5 用（近）<b>rectified flow</b>（流路径近似直线、单步 Euler 积分即够）一致。⚠️ 但 CI 宽 5–7 pp，<b>排除不了几个 pp 的差异</b>——「减步精确免费」不成立，要分辨需 n≥500（官方全量）。延迟随 num_steps 线性下降（每步 ~14.7 ms），boosted 与 throttled 两口径同步，<b>交叉验证了下面的延迟分解</b>。</p>
 
       <div class="ds-tablewrap"><table class="ds-table">
         <caption>表 2 · 延迟分解：L(N) = prefix + N × per_step（in-process，每值 N=15，boosted）</caption>
@@ -131,7 +131,7 @@
         <tr><td class="rowh">replan=10 + async prefetch</td><td class="num">500 ms</td><td>boosted 504</td><td class="num">~101%</td><td class="ctr">⚠ 贴边</td></tr>
         <tr><td class="rowh">replan=10 + num_steps=5 + prefetch</td><td class="num">500 ms</td><td>boosted 441</td><td class="num best">88%</td><td class="ctr best">✓ 延迟轴可行</td></tr>
       </table></div>
-      <p class="sec-note"><b>🔴 但 prefetch 撞上第二堵墙</b>：推理 ≈ 一个 chunk 执行时间 ⇒ prefetch 必须提前 1 整 chunk 用<b>旧 obs</b> 推理 ⇒ obs 陈旧毁掉成功率（实测同 task/seed：sync replan=10 = <b>6/6</b> vs prefetch replan=10 = <b>0/6</b>）。<b>⇒ Orin 上 π0.5「20 Hz 实时」与「准确」不可兼得</b>：要么 sync（新鲜 obs、准确，但机器人等待 + DVFS 降频、有效 ~9–10 Hz），要么 prefetch（实时可行但 obs 陈旧、成功率崩）。出路只有<b>更快推理压 prefix</b>（把 383 ms 地板再压到 &lt;250 ms，需 TRT/量化）或<b>更低控制频率</b>。</p>
+      <p class="sec-note"><b>🔴 但 prefetch 撞上第二堵墙</b>：推理 ≈ 一个 chunk 执行时间 ⇒ prefetch 必须提前 1 整 chunk 用<b>旧 obs</b> 推理 ⇒ obs 陈旧毁掉成功率（实测同 task/seed：sync replan=10 = <b>6/6</b>（CI[54.1,100]）vs prefetch replan=10 = <b>0/6</b>（CI[0,45.9]））。⚠️ <b>n=6 功效不足</b>——0/6 的 CI 上界 45.9%，排除不了「prefetch 其实能成功到 46%」，已计划补到 n≥20–30（若仍全败，上界收窄到 16.8%/11.6%）。<b>⇒ Orin 上 π0.5「20 Hz 实时」与「准确」不可兼得</b>：要么 sync（新鲜 obs、准确，但机器人等待 + DVFS 降频、有效 ~9–10 Hz），要么 prefetch（实时可行但 obs 陈旧、成功率崩）。出路只有<b>更快推理压 prefix</b>（把 383 ms 地板再压到 &lt;250 ms，需 TRT/量化）或<b>更低控制频率</b>。</p>
       <p class="sec-note"><b>实时性的核心不等式</b>：<code>T_infer ≤ H / f_control</code>（一次推理时间 ≤ H 步动作的物理执行时间）——<b>提高控制频率只会让预算 H/f_control 更小、实时更不可行</b>（控制步是机器人物理时间、非计算，动作幅度按 20 Hz 标定）；业界解法（temporal ensembling / 压模型 / 分层解耦控制）详见 <a href="https://github.com/ranpin/pi05-edge/blob/main/docs/REPORT.md" target="_blank" rel="noopener">REPORT.md 讨论节</a>。</p>
 
       <div class="ds-tablewrap"><table class="ds-table">
@@ -142,7 +142,7 @@
         <tr><td class="rowh">expert step（去噪 1 步）</td><td class="num">9</td><td class="ctr">memory</td><td class="num">5.7 ms</td><td class="num">16.5 ms</td><td class="num">34.8%</td><td class="ctr best">roof 4×</td></tr>
       </table></div>
       <p class="sec-note"><b>🔴 roofline 判定：prefix 两段都是 compute-bound（AI 266 / 998 ≫ 脊点 192），而 weight-only 量化只省访存、不省算力 ⇒ INT4 对 prefix 零收益</b>（roof 纹丝不动）；唯一被 INT4 救的是 memory-bound 的 expert step（AI 9，roof 4×），但它只占 29%、省下来也撞 prefix 地板。能挪动 prefix 的只有 <b>W8A8</b>（算力 ×1.37，prefill roof 136→99 ms）——全栈激进（W8A8 + ns=1 + INT4 expert + 砍 overhead）才勉强压到 ≈235 ms、贴 250 ms 边线，且带精度回退与 JAX→TRT 导出墙（Orin sm_87 无 FP8/FP4）双重风险。<b>⇒ G5 从「压 prefix 就能实时」重定位为带预注册 kill 判据的可行性探针</b>。两条免量化软件优化：SigLIP 三图合批（现 3 次 batch-1 调用、利用率仅 22.9%）、prompt 仅 4 token 却 pad 到 200 槽（~20% prefill 白算）。口径：roof = <code>max(FLOPs/峰值算力, bytes/峰值带宽)</code>、利用率 = roof/实测，INT4/W8A8 列是 roof 时间算术（非实测量化推理，G5 才测）；相位实测与表 2 交叉一致（SigLIP 99 vs 100、prefill 214 vs 210 ms）。</p>
-      <p class="sec-note"><b>计时口径</b>：L1 不是常数——由 GPU DVFS 主导，分 <b>boosted</b>（背靠背/async prefetch，GPU 持续忙、~1300 MHz，487–515 ms）与 <b>throttled</b>（同步闭环，GPU 两次推理间空转掉到 306 MHz 地板、每次从低频爬坡，570–587 ms）两口径；报任何 L1 必须标明。L3 = LIBERO 期望控制频率 = 20 Hz（源码核实）。<b>诚实边界</b>：单 seed、100 ep（官方 500）、仅 libero_spatial（最易套件，十 task 同质「pick black bowl」）；更难套件（libero_10 官方 92.4、更灵巧）可能对减步更敏感，「减步免费」结论 scope 限本套件。纯仿真、无真机；模型层零贡献（用官方 fine-tuned 权重）。</p>
+      <p class="sec-note"><b>计时口径</b>：L1 不是常数——由 GPU DVFS 主导，分 <b>boosted</b>（背靠背/async prefetch，GPU 持续忙、~1300 MHz，487–515 ms）与 <b>throttled</b>（同步闭环，GPU 两次推理间空转掉到 306 MHz 地板、每次从低频爬坡，570–587 ms）两口径；报任何 L1 必须标明。L3 = LIBERO 期望控制频率 = 20 Hz（源码核实）。<b>诚实边界</b>：单 seed、100 ep（官方 500）、仅 libero_spatial（最易套件，十 task 同质「pick black bowl」）；更难套件（libero_10 官方 92.4、更灵巧）可能对减步更敏感，「n=100 下无可测损失」结论 scope 限本套件、且受 CI 宽度约束。纯仿真、无真机；模型层零贡献（用官方 fine-tuned 权重）。</p>
     </section>
 
     <!-- ============ 核心方法 ============ -->
