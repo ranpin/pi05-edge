@@ -2,7 +2,7 @@
 
 > **呈现主页面**。方法与可复现细节见 [METHODOLOGY.md](METHODOLOGY.md)，全流程踩坑见 [PROBLEMS.md](PROBLEMS.md)。
 >
-> **状态**：G1 / G2 已完成并有实测数据；**G3 桥接闭环冒烟通过（2/2）+ Top2 async prefetch 墙已实测**；**G4 延迟分解 + quality 轴均已实测（prefix 71% / action expert 29%；num_steps 10/5/1 = 99/100/98%，减步免费）**；G3 全量成功率评测、G5 待做。本页只写**已实测**或**已从源码核实**的内容；推导值与未测项均显式标注。
+> **状态**：G1 / G2 已完成并有实测数据；**G3 桥接闭环冒烟通过（2/2）+ Top2 async prefetch 墙已实测**；**G4 延迟分解 + quality 轴 + roofline 均已实测（prefix 71% / action expert 29%；num_steps 10/5/1 = 99/100/98%，减步免费；prefix 两段均 compute-bound ⇒ weight-only INT4 零收益）**；G3 全量成功率评测、G5 待做。本页只写**已实测**或**已从源码核实**的内容；推导值与未测项均显式标注。
 
 ## 摘要
 
@@ -10,7 +10,7 @@
 
 头条结果（实测）：π0.5 在 Orin 上的纯推理延迟 **L1 = 487.7 ms（2.05 Hz）**，输出 action chunk 形状 `(10, 7)`。结合从 openpi / LIBERO 源码核实的官方评测协议——**控制频率 20 Hz、每 5 步重规划（`replan_steps=5`）**——可算出每次策略查询只有 **250 ms** 的机器人时间预算，而实测推理要 ~490 ms，**超支 1.96×**，真机上只能产出 ~10.2 Hz 的动作流。
 
-但 `replan_steps` 这个**纯编排旋钮**（零模型改动、零重训）调到 10 后，G3 闭环实测却推翻了「实时可行」的乐观推算：**L1 不是常数**——由 GPU DVFS 主导，同步闭环里 GPU 在两次推理间空转掉频，L1 从背靠背 ~504 ms 升到 ~587 ms ⇒ replan=10 同步占空比 **117% 超支**；只有 async prefetch 让 GPU 持续忙才拉回 ~101%（贴边）。**而 prefetch 又撞上第二堵墙**：推理 ~504 ms ≈ 一个 chunk 执行时间 500 ms，prefetch 必须提前 1 整 chunk 用旧 obs 推理 ⇒ obs 陈旧毁掉成功率（实测 sync replan=10 = 6/6 vs prefetch replan=10 = 0/6）。**⇒ Orin 上 π0.5「20 Hz 实时」与「准确」不可兼得**，出路只有更快推理或更低控制频率。**G4 延迟分解进一步定位了「更快推理」的靶子**：504 ms 里 **prefix（SigLIP 图像编码 + Gemma 2B prefill）占 71%（368 ms）、flow-matching action expert 只占 29%（14.7 ms/去噪步）**——把 num_steps 从 10 减到 1 也只到 383 ms（prefix 是地板），**要压到 <250 ms 必须动 prefix（G5 TRT/量化），减 num_steps 必要但不充分**。**G4 quality 轴闭环实测坐实了另一半**：libero_spatial 上 num_steps 从 10→5→1 减，成功率 99%/100%/98%（全在 100 ep 噪声内）——**减步基本免费**（与近 rectified flow 一致），但 num_steps=1 仍 383 ms 跨不过 250 ms 预算，**prefix 地板才是那堵墙不可动的根**。同时，LIBERO 官方 eval 循环**没有任何实时 pacing**，因此 **benchmark 成功率与推理延迟是两条独立的轴**——「复现官方成功率」与「实时可行性」必须分开报告，不能混成一个 Hz 数字。
+但 `replan_steps` 这个**纯编排旋钮**（零模型改动、零重训）调到 10 后，G3 闭环实测却推翻了「实时可行」的乐观推算：**L1 不是常数**——由 GPU DVFS 主导，同步闭环里 GPU 在两次推理间空转掉频，L1 从背靠背 ~504 ms 升到 ~587 ms ⇒ replan=10 同步占空比 **117% 超支**；只有 async prefetch 让 GPU 持续忙才拉回 ~101%（贴边）。**而 prefetch 又撞上第二堵墙**：推理 ~504 ms ≈ 一个 chunk 执行时间 500 ms，prefetch 必须提前 1 整 chunk 用旧 obs 推理 ⇒ obs 陈旧毁掉成功率（实测 sync replan=10 = 6/6 vs prefetch replan=10 = 0/6）。**⇒ Orin 上 π0.5「20 Hz 实时」与「准确」不可兼得**，出路只有更快推理或更低控制频率。**G4 延迟分解进一步定位了「更快推理」的靶子**：504 ms 里 **prefix（SigLIP 图像编码 + Gemma 2B prefill）占 71%（368 ms）、flow-matching action expert 只占 29%（14.7 ms/去噪步）**——把 num_steps 从 10 减到 1 也只到 383 ms（prefix 是地板），**要压到 <250 ms 必须动 prefix（G5 TRT/量化），减 num_steps 必要但不充分**。**G4 quality 轴闭环实测坐实了另一半**：libero_spatial 上 num_steps 从 10→5→1 减，成功率 99%/100%/98%（全在 100 ep 噪声内）——**减步基本免费**（与近 rectified flow 一致），但 num_steps=1 仍 383 ms 跨不过 250 ms 预算，**prefix 地板才是那堵墙不可动的根**。**G4 roofline 进一步给出机理判定**：prefix 两段（SigLIP AI=266、Gemma 2B prefill AI=998）的算术强度都远高于 Orin 实测脊点（192 FLOP/B），**都是 compute-bound**——而 weight-only 量化只省访存不省算力，**对 prefix 零收益**（INT4 下 prefill roof 纹丝不动），只有 memory-bound 的 expert step（AI=9）能拿 4×。这把「压 prefix」从方向变成带判据的命题：**weight-only INT4 已被实测排除，能挪动 prefix 的只有 W8A8/TRT（幅度有限、带精度与导出双重风险），G5 因此重定位为带预注册 kill 判据的可行性探针**。同时，LIBERO 官方 eval 循环**没有任何实时 pacing**，因此 **benchmark 成功率与推理延迟是两条独立的轴**——「复现官方成功率」与「实时可行性」必须分开报告，不能混成一个 Hz 数字。
 
 **诚实定位**：不训练、不微调（微调在后期 Kaggle 阶段，且必须服务部署主线）；纯仿真、无真机；主交付物 = **Orin 性能解剖 + action-chunk 调度层**，TRT / 量化是加分项。
 
@@ -27,9 +27,10 @@
 | Top2 prefetch | async prefetch 能救回实时性吗？ | sync vs prefetch 各 6 ep 对照（同 task/seed） | **prefetch 墙**：obs 陈旧 1 chunk ⇒ 0/6 失败（sync 6/6）；实时与准确不可兼得 | 出路=更快推理（G4/G5） |
 | G4 | 延迟花在哪？ | num_steps 扫描（in-process，每值 N=15）+ 延迟分解 | ✅ **prefix（SigLIP+Gemma2B）368ms=71% vs action expert 14.7ms/步=29%**，线性度完美（implied per_step 14.6-14.8） | num_steps→1 也只到 383ms（prefix 是地板）⇒ 破墙须压 prefix |
 | G4 quality 轴 | 减 num_steps 会伤成功率吗？ | 闭环 num_steps=10/5/1 各 100 ep（replan=5、sync、seed 7） | ✅ **99/100/98%，全在噪声内 ⇒ 减步基本免费**（与 rectified flow 一致）；throttled L1 585→517→458 交叉验证分解 | 地板 383ms 仍 >250ms 预算 ⇒ prefix 是墙根 |
-| G5 | 能否压 prefix（368ms 地板）？ | TRT / 量化导出尝试 | 🔜 加分项；**G4 已定位 prefix=71% 是靶子**；不通则写成墙结论 | — |
+| G4 roofline | prefix 是算力还是访存瓶颈？量化挪得动吗？ | 实测设备峰值 + 逐相位 FLOPs/访存 → roofline（表 6） | ✅ **prefix 两段均 compute-bound**（AI 266/998 ≫ 脊点 192）⇒ **weight-only INT4 零收益**；仅 memory-bound expert step（AI 9）拿 4× | 能挪 prefix 的只有 W8A8/TRT ⇒ G5 重定位为带 kill 判据的可行性探针 |
+| G5 | 能否压 prefix（368ms 地板）？ | W8A8 / TRT 导出可行性探针（预注册 kill 判据） | 🔜 加分项；roofline 已排除 weight-only INT4；不通则写成墙结论 | — |
 
-> **地图 1（结构图 + 模块级资源账）** 随 G4 性能解剖产出后补入本节之前——现在还没有模块级实测数据，不预先画。
+> **地图 1（结构图 + 模块级资源账）**：模块级实测数据已随 G4 roofline 产出——逐相位 FLOPs / 访存 / 算力-访存瓶颈判定见下文**表 6**。结构图非必需交付，不预先画。
 
 ## 核心结果
 
@@ -130,6 +131,33 @@ gap=1.0 探针期间并发采 GPU `cur_freq`（80 样本）：**17 @ 306 MHz（�
 **结果**：三档全落在 98–100%（100 ep 二项噪声内），misses 均为**分散的单 ep 噪声**（ns=10 掉 task9、ns=1 掉 task4+7、ns=5 全清，不集中在某难 task）⇒ **在 libero_spatial 上把 num_steps 从 10 减到 1 基本免费（无可测成功率损失）**。
 **分析**：① 与 π0.5 用（近）**rectified flow** 一致——流路径近似直线，单步 Euler 积分即够，无需多步去噪。② 闭环 throttled L1（585→517→458）与表 4 boosted L1（515→441→383）都随 num_steps 线性下降（每步 ~14.7 ms），**第三次交叉验证延迟分解**（也坐实 server 确实用了所配的 num_steps）。③ **但不改变 prefetch 墙结论**：num_steps=1 boosted 仍 383 ms > 250 ms 预算（replan=5），**prefix 地板 368 ms 是墙的根，破墙须 G5 压 prefix**——减步免费却到不了 250 ms 以下。
 **诚实边界**：单 seed（7）、100 ep（官方 500）、仅 libero_spatial（最易套件，十 task 同质「pick up black bowl + place on plate」）；**更难的套件（如 libero_10 官方 92.4、更灵巧）可能对减步更敏感**，「免费」结论 scope 限 libero_spatial，跨套件泛化待测。原始数据入库 `results/g4_quality/`（三份 JSONL，各 100 ep + SUMMARY）。
+
+### 表 6 · G4 roofline：prefix 两段均 compute-bound ⇒ weight-only 量化零收益（2026-11-13 干净单轮）
+
+回答表 4/5 留下的机理问题：**prefix 是算力瓶颈还是访存瓶颈？量化到底挪不挪得动它？** 方法 = 经典 roofline：逐相位算 FLOPs 与访存字节数 → 算术强度 `AI = FLOPs / bytes` → 与**实测**设备脊点比，判 compute-/memory-bound，再算 roof 时间 `max(FLOPs/峰值算力, bytes/峰值带宽)` 与利用率 `roof/实测`。设备峰值全部**实测**（非纸面；sustained 负载 + 逐基准采 GPU 频率，钉在 boost 1300.5 MHz，以吸收 nvpmodel 未锁的影响，见诚实边界）。
+
+**设备可达峰值（实测）**：bf16 **29.2 TFLOPS**（4096³；8192³=27.1、FFN 形 1024×16384×2048=26.2）· int8 **40.0 TOPS = 1.37× bf16**（非理论 2×，XLA int8 路在 Orin 偏弱）· 带宽 **152.1 GB/s** · **脊点 = 192 FLOP/B**。⚠️ 薄 GEMM（968×2048×2048，即 prefix 单层形状）只测得 **6.1 TFLOPS @ 306 MHz**——这类形状不触发 DVFS boost，是 SigLIP 利用率低的直接原因。
+
+| 相位 | FLOPs | bytes | AI | bound | roof | 实测 | 利用率 | 有效算力 |
+|---|---|---|---|---|---|---|---|---|
+| SigLIP（3 图） | 662 G | 2.49 G | 266 | **COMPUTE** | 22.7 ms | 99.2 ms | 22.9% | 6.7 TF |
+| Gemma 2B prefill | 3975 G | 3.98 G | **998** | **COMPUTE** | 136.3 ms | 213.6 ms | 63.8% | 18.6 TF |
+| expert step（去噪 1 步） | 7.67 G | 0.87 G | **9** | **MEMORY** | 5.7 ms | 16.5 ms | 34.8% | 0.5 TF |
+
+（相位实测与表 4 的 num_steps 扫描交叉一致：SigLIP 99.2 vs 100.3、G2B prefill 213.6 vs 209.6、expert 16.5 vs 14.7——expert 差 ~2 ms 是「单独 JIT 单步 vs 融合 while_loop 边际步」的口径差，与表 4 的 54 ms 残差同源。）
+
+**量化 what-if（roof 时间，算术推导、非实测量化推理）**：
+
+| 相位 | bf16 roof | INT4 weight-only | W8A8（算力×1.37） |
+|---|---|---|---|
+| Gemma 2B prefill | 136.3 ms | **136.3 ms（纹丝不动）** | 99.4 ms |
+| SigLIP | 22.7 ms | **22.7 ms（不动）** | 16.5 ms |
+| expert step | 5.6 ms | **1.4 ms（4×）** | 2.8 ms |
+
+**结果**：① prefix 两段 AI（266 / 998）都 ≫ 脊点 192 ⇒ **都是 compute-bound**。② weight-only 量化只减访存字节、不减 FLOPs，而 compute-bound 相位的 roof 由 `FLOPs/算力` 决定 ⇒ **INT4 weight-only 对 prefix 零收益**（上表 prefill/SigLIP 两行 INT4 列原样不动）；唯一被 INT4 救的是 memory-bound 的 expert step（4×），但它只占 29%、且省下来也撞 prefix 地板。③ 能挪动 prefix 的只有 **W8A8**（靠算力×1.37 把 prefill roof 拉到 99.4 ms）——**这是量化通向 prefix 的唯一通道，且幅度有限**。
+**分析（回答「压 Gemma 2B 能否到实时」，replan=5 预算 250 ms）**：① 只做 weight-only INT4——prefill/SigLIP roof 纹丝不动 ⇒ ns=1 仍 ≈370–383 ms ≫ 250 ms，**实测 roofline 已判失败**。② 唯一能挪 prefix 的是 W8A8：prefix 折算 ~228 ms，再叠 ns=1 + INT4 expert + 砍非模型 overhead，全栈激进才勉强压到 **≈235 ms**、贴 250 ms 边线——且带**精度回退**与 **JAX→TRT 导出墙**（Orin sm_87 无 FP8/FP4）双重风险。**⇒ G5 重定位为带预注册 kill 判据的可行性探针**（如「W8A8 后 prefill 实测增益 <5% ⇒ 墙结论」），而非「压 prefix 就能实时」。
+**两条免量化的软件优化（roofline 暴露）**：① **SigLIP 三图合批**——现 3 次 batch-1 调用各重读一遍权重（bytes 2.49 G）且薄 GEMM 不 boost，利用率仅 22.9%；合成一次 3-图调用则权重只读一遍、GEMM 变厚 ⇒ 实测应显著向 22.7 ms roof 靠拢（推导，未实测）。② **prompt padding 浪费**——真实 prompt 仅 4 token 却 pad 到 200 槽，**~20% 的 prefill token 是 padding 白算**（软件可去掉，未实测）。
+**诚实边界**：相位是**各自单独 JIT**（非 `sample_actions` 融合整体），与表 4 残差同源；nvpmodel 未锁（靠 sustained 基准钉 boost 态）；量化列是 **roof 时间算术**，非真实量化推理实测（G5 才测）。原始日志入库 `results/g4_roofline/roofline_clean_run_2026-11-13.txt`。
 
 ## 方法
 
@@ -234,8 +262,8 @@ gap=1.0 探针期间并发采 GPU `cur_freq`（80 样本）：**17 @ 306 MHz（�
 ### 待办
 
 - **G3 全量**：`libero_spatial` 500 episode 复现官方 98.8（≈3.5–5 h Orin 时间），记差值、分歧定位到层。（桥接冒烟 + L2 已完成：L2−L1 ≈ 7 ms。）
-- **G4（主交付物）**：✅ **延迟分解 + quality 轴均已实测**。延迟分解（表 4）：prefix 368ms=71% / action expert 14.7ms/步=29%，num_steps→1 地板 383ms。quality 轴（表 5）：闭环 num_steps=10/5/1 各 100 ep = 99/100/98% ⇒ **减步基本免费**（与 rectified flow 一致），但地板 383ms 仍 > 250ms 预算 ⇒ prefix 是墙根、破墙须 G5。统一内存 roofline 可选。
+- **G4（主交付物）**：✅ **延迟分解 + quality 轴 + roofline 均已实测**。延迟分解（表 4）：prefix 368ms=71% / action expert 14.7ms/步=29%，num_steps→1 地板 383ms。quality 轴（表 5）：闭环 num_steps=10/5/1 各 100 ep = 99/100/98% ⇒ **减步基本免费**（与 rectified flow 一致），但地板 383ms 仍 > 250ms 预算 ⇒ prefix 是墙根。roofline（表 6）：prefix 两段均 compute-bound（AI 266/998 ≫ 脊点 192）⇒ **weight-only INT4 零收益**、能挪 prefix 的只有 W8A8/TRT。
 - **Top2 续**：prefetch 墙已实测（sync 6/6 vs prefetch 0/6）；可再探更聪明方案（temporal ensembling / obs 预测）能否缓解陈旧，但机制上「推理≈chunk 时长 ⇒ 必陈旧 1 chunk」是硬约束。
-- **G5**：TRT / 量化（加分项；不通就写成「flow-matching VLA 在 TRT 10.7 / sm_87 的导出障碍是 X」这类墙结论）。
+- **G5（重定位为可行性探针）**：roofline 已排除 weight-only INT4（对 prefix 零收益）；G5 只探 **W8A8 / TRT 导出**能否挪动 prefix，且**预注册 kill 判据**（如「W8A8 后 prefill 实测增益 <5% ⇒ 墙结论：flow-matching VLA 在 TRT 10.7 / sm_87 破不了 250ms」）。加分项，不通就如实写成墙结论。
 - **demo 页**：✅ 已上线 <https://ranpin.github.io/pi05-edge/>（三板块单页：4 条 rollout 视频 + 3 张三线表 + 动态 SVG 插图；main /docs 直推 + Pages）。
 - **后期 Kaggle 微调**：少步推理微调（用 G4 的步数 Pareto 把前沿前推），闭合「训练→量化→部署→评测」全环。

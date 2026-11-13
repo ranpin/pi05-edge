@@ -1,0 +1,47 @@
+jax devices: [CudaDevice(id=0)] | backend: gpu
+=== A. DEVICE ACHIEVABLE PEAKS (measured, sustained load, clock-pinned) ===
+  bf16 GEMM 8192^3          :   27.1 TFLOPS  (clk 1300.5 MHz)
+  bf16 GEMM 4096^3          :   29.2 TFLOPS  (clk 1300.5 MHz)
+  bf16 GEMM 1024x16384x2048 :   26.2 TFLOPS  (clk 1224.0 MHz)
+  bf16 GEMM 968x2048x2048   :    6.1 TFLOPS  (clk 306.0 MHz)
+  int8 GEMM 8192^3          : 39.98268274598513 TOPS  (clk 1300.5 MHz)
+  mem BW copy / read-only   : 152.1 / 141.6 GB/s  (clk 1300.5 MHz)
+  PEAK bf16 = 29.2 TFLOPS | PEAK BW = 152.1 GB/s | ridge = 192 FLOP/B
+
+=== B. MODEL CHARACTERIZATION ===
+policy load: 8.7s
+  params siglip   :    414.8 M   e.g. ['PaliGemma/img/Transformer/encoder_norm/bias/.value', 'PaliGemma/img/Transformer/encoder_norm/scale/.value']
+  params gemma2b  :   2508.5 M   e.g. ['PaliGemma/llm/embedder/input_embedding/.value', 'PaliGemma/llm/final_norm/scale/.value']
+  params expert   :    427.9 M   e.g. ['PaliGemma/llm/final_norm_1/Dense_0/bias/.value', 'PaliGemma/llm/final_norm_1/Dense_0/kernel/.value']
+  params action_io:      2.2 M   e.g. ['action_in_proj/bias/.value', 'action_in_proj/kernel/.value']
+  params other    :      0.0 M   e.g. []
+  params TOTAL     :   3353.4 M
+  config check: gemma_2b linear = 1981.8 M | expert linear = 311.4 M
+  n_images = 3 | prompt tokens = 4 | T_prefix = 968
+  KV cache bytes (bf16) = 17.8 MB
+  T_suffix = 10 (action_horizon; pi05 suffix = action tokens only)
+
+=== C. PHASE TIMING (same run, boosted back-to-back) ===
+  SigLIP (3 images)                      mean=   99.2ms  median=   99.3  min=   98.6  std=  0.4
+  embed_prefix (SigLIP+text embed)       mean=   99.4ms  median=   99.3  min=   99.0  std=  0.4
+  full prefix (embed+G2B prefill)        mean=  313.0ms  median=  312.9  min=  312.3  std=  0.4
+  one denoising step (expert)            mean=   16.5ms  median=   15.9  min=   15.6  std=  2.0
+  GPU clock after phases: 1300.5 MHz
+
+=== D. ROOFLINE (FLOPs/bytes vs measured peaks) ===
+  prompt: 4 real tokens padded to 200 slots => 20% of prefill tokens are padding
+  SigLIP (3 imgs)        FLOPs=  661.60G  bytes= 2.489G  AI=   266 (ridge 192)  roof=   22.7ms [COMPUTE]  meas=   99.2ms  util= 22.9%  eff=  6.7TF
+  Gemma2B prefill        FLOPs= 3974.95G  bytes= 3.981G  AI=   998 (ridge 192)  roof=  136.3ms [COMPUTE]  meas=  213.6ms  util= 63.8%  eff= 18.6TF
+  expert step            FLOPs=    7.67G  bytes= 0.874G  AI=     9 (ridge 192)  roof=    5.7ms [MEMORY ]  meas=   16.5ms  util= 34.8%  eff=  0.5TF
+  SigLIP batched(whatif) FLOPs=  661.60G  bytes= 0.830G  AI=   797 (ridge 192)  roof=   22.7ms [COMPUTE]  meas=   99.2ms  util= 22.9%  eff=  6.7TF
+
+  quant what-if (roof times):
+  Gemma2B prefill  bf16 roof=  136.3ms | INT4 weight-only=  136.3ms | W8A8(x1.37 compute)=   99.4ms
+  expert step      bf16 roof=    5.6ms | INT4 weight-only=    1.4ms | W8A8(x1.37 compute)=    2.8ms
+  SigLIP           bf16 roof=   22.7ms | INT4 weight-only=   22.7ms | W8A8(x1.37 compute)=   16.5ms
+
+=== SUMMARY ===
+  prefix total (measured, embed+prefill) = 313.0 ms
+  expert step (measured)                 = 16.5 ms
+  implied L(num_steps) = 313 + N x 16.5 ms
+=====================================================================
