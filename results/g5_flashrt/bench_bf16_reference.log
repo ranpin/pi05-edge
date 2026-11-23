@@ -1,0 +1,35 @@
+Preset 'lossless': num_views=2 pool=1 layers=27 steps=10 cache_frames=1
+
+Loading checkpoint: /openpi_cache/openpi-assets/checkpoints/pi05_libero_pytorch
+WARNING:flash_rt.frontends.torch.pi05_rtx:GPU does not advertise FP8 support: disabling FP8 paths for the Pi0.5 RTX pipeline.
+Calibrating…
+  autotune: tested 8 algos, best=0 (77.8688 us)
+  autotune: tested 8 algos, best=3 (164.093 us)
+  autotune: tested 8 algos, best=2 (65.024 us)
+  autotune: tested 8 algos, best=3 (169.61 us)
+  autotune: tested 8 algos, best=2 (183.552 us)
+  autotune: tested 8 algos, best=7 (82.0064 us)
+  autotune: tested 8 algos, best=4 (229.658 us)
+  autotune: tested 8 algos, best=3 (181.878 us)
+  autotune: tested 8 algos, best=0 (1369.99 us)
+  autotune: tested 8 algos, best=0 (1362.39 us)
+  autotune: tested 8 algos, best=6 (1205.28 us)
+  autotune: tested 6 algos, best=3 (6.1952 us)
+  autotune: tested 5 algos, best=0 (39.28 us)
+  autotune: tested 7 algos, best=4 (21.4656 us)
+  autotune: tested 7 algos, best=3 (55.8624 us)
+  autotune: tested 7 algos, best=2 (55.9744 us)
+  autotune: tested 7 algos, best=5 (55.5264 us)
+  autotune: tested 1 algos, best=0 (10.8352 us)
+Warmup (8 iters)…
+Measuring (15 iters)…
+
+=======================================================
+  Config : num_views=2  pool=1  layers=27  steps=10  cache_frames=1  cuda_graph=True
+  Actions: (10, 7)
+  p50    : 178.8 ms   → 5.59 Hz
+  p95    : 179.2 ms
+  min    : 178.3 ms   → 5.61 Hz
+=======================================================
+BENCH_EXIT=0
+BENCH_DONE

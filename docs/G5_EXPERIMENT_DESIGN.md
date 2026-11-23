@@ -189,7 +189,36 @@ run Gemma2B prefill (over cached-or-fresh visual + fresh state) + action expert
 - **文档修正**（无论 A/B 进度）：REPORT.md / demo 页的「Orin 不可实时 / 实时与准确不可兼得」须改为「**naive JAX 撞墙；INT8+工程可达 8Hz 实时（FlashRT 已证、我们复现验证）；自适应分层调度进一步破墙（方案 B）**」。
 - **最终叙事**：「系统诊断主流 VLA 边缘实时瓶颈 → 建立有预测力的分析框架（roofline + control-time 不等式，被工业界/顶会独立验证）→ 实证墙与解法 → 原创自适应调度前沿」。含金量在**分析原创 + 调度原创**，复现是脚注。
 
-## 4. 来源
+## 4. 方案 A 执行结果（2026-11-23，dog Orin 32GB）
+
+**✅ 核心结果：FlashRT π0.5 INT8 W8A8 无损路径在 dog 复现成功。**
+
+| 配置 | p50 | p95 | Hz | 备注 |
+|---|---|---|---|---|
+| naive JAX BF16（G2 基线） | ~490 ms | — | 2.05 | 本项目原始 |
+| FlashRT BF16（融合+CUDA graph） | 178.8 ms | 179.2 | 5.59 | `--no-int8` |
+| **FlashRT INT8 W8A8 + cache_frames=1（无损）** | **128.6 ms** | 128.9 | **7.77** | `--preset lossless`，Actions (10,7) ✓ |
+
+**加速链分解（验证 roofline）**：
+- INT8 / FlashRT-BF16 = 178.8/128.6 = **1.39× ≈ roofline 预测的 W8A8 算力乘数 1.37×** ⇒ **roofline 被精确验证**。
+- naive JAX / FlashRT-BF16 = 490/178.8 = **2.74×** = kernel 融合 + CUDA graph 消除的工程差距（naive JAX 离 roof 远）。
+- naive JAX / INT8 = 490/128.6 = **3.81×** 总加速。
+- **128.6ms < 250ms（replan=5 预算）⇒ 同款 Orin 上 sync replan=5 实时可行**，墙消解（与调研修正一致）。
+- 对照 FlashRT 公布 64GB 结果 124ms/8.04Hz：我们 32GB 得 128.6ms/7.77Hz，微差（内存带宽/热态/DVFS），量级一致。
+
+**Setup 踩坑记录（可复现）**：
+1. host cmake 3.22 太旧（需≥3.24）+ torch wheel 下载限速 ⇒ **改用 openpi 容器**（自带 torch 2.11 CUDA/Orin、cmake 3.31、nvcc 12.6、sentencepiece）。
+2. cmake 缺 pybind11 ⇒ 容器 pip 装；cmake 错用 /usr/bin/python3 ⇒ 改 `/opt/venv/bin/python3` + 显式 `pybind11_DIR`。
+3. FA2 hdim256（非因果+因果）编译极慢（Orin ARM ~40min 总 build）。
+4. **checkpoint 转换 OOM**：dog 是 **32GB**（FlashRT 在 64GB 验证），float32 restore 峰值~30GB 被杀；bf16 restore 仍 OOM。**解法=低内存转换**：bf16 restore + `torch.from_numpy` bf16→float32 shim + **跳过完整 PI0Pytorch 模型构建**（slicing 已产 HF 名 state dict，直接 `save_file`）+ `.contiguous()`，峰值~22GB 通过。
+5. **tied weights**：save_file 不含 `lm_head.weight`（PaliGemma tied 到 embed_tokens）⇒ 补 `lm_head.weight = embed_tokens.weight.clone()`。
+6. 产物：`pi05_libero_pytorch/model.safetensors`（6.7GB bf16）+ config.json + assets。脚本存 `/home/vision/chenrunbin/g5_flashrt/FlashRT/`（patch_lowmem.py / run_lowmem.sh / bench_*.sh）。
+
+**待补**：① 精度对拍（FlashRT INT8 vs naive JAX 同 obs cosine，确认转换正确+无损）；② 闭环成功率（FlashRT 包 websocket server 跑 LIBERO sync replan=5，确认 128ms 下既实时又≈99%）；③ production preset（cache_frames=2，~12Hz）可选。
+
+**原始日志**：`results/g5_flashrt/bench_lossless_int8.log`、`bench_bf16_reference.log`。
+
+## 5. 来源
 
 - FlashRT Orin 指南 https://github.com/flashrt-project/FlashRT/blob/main/docs/deployment_orin.md
 - FlashRT USAGE / bench_pi05.py https://github.com/flashrt-project/FlashRT/blob/main/USAGE.md

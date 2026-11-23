@@ -1,0 +1,23 @@
+Preset 'lossless': num_views=2 pool=1 layers=27 steps=10 cache_frames=1
+
+Loading checkpoint: /openpi_cache/openpi-assets/checkpoints/pi05_libero_pytorch
+WARNING:flash_rt.frontends.torch.pi05_rtx:FVK_PI05_RTX_FORCE_INT8/INT8_ENCODER_ONLY set: INT8 encoder+decoder
+Calibrating…
+  autotune: tested 8 algos, best=6 (96.4384 us)
+  autotune: tested 8 algos, best=3 (178.624 us)
+  autotune: tested 8 algos, best=2 (73.4496 us)
+  autotune: tested 8 algos, best=3 (221.418 us)
+  autotune: tested 8 algos, best=2 (413.27 us)
+  autotune: tested 8 algos, best=7 (94.5952 us)
+Warmup (8 iters)…
+Measuring (15 iters)…
+
+=======================================================
+  Config : num_views=2  pool=1  layers=27  steps=10  cache_frames=1  cuda_graph=True
+  Actions: (10, 7)
+  p50    : 128.6 ms   → 7.77 Hz
+  p95    : 128.9 ms
+  min    : 128.5 ms   → 7.78 Hz
+=======================================================
+BENCH_EXIT=0
+BENCH_DONE
