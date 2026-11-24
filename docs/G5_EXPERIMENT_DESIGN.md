@@ -214,11 +214,56 @@ run Gemma2B prefill (over cached-or-fresh visual + fresh state) + action expert
 5. **tied weights**：save_file 不含 `lm_head.weight`（PaliGemma tied 到 embed_tokens）⇒ 补 `lm_head.weight = embed_tokens.weight.clone()`。
 6. 产物：`pi05_libero_pytorch/model.safetensors`（6.7GB bf16）+ config.json + assets。脚本存 `/home/vision/chenrunbin/g5_flashrt/FlashRT/`（patch_lowmem.py / run_lowmem.sh / bench_*.sh）。
 
-**待补**：① 精度对拍（FlashRT INT8 vs naive JAX 同 obs cosine，确认转换正确+无损）；② 闭环成功率（FlashRT 包 websocket server 跑 LIBERO sync replan=5，确认 128ms 下既实时又≈99%）；③ production preset（cache_frames=2，~12Hz）可选。
+**闭环验证（2026-11-24，进行中）**：FlashRT 包成 openpi 协议 websocket server（`flashrt_server.py`，`state_prompt_mode="fixed"`），pc-3070 跑 LIBERO sync replan=5。
+- 冒烟 task0 ×2 = **2/2 成功**，server_L1≈238ms（**比 bench 128ms 高~110ms = state-in-prompt 每步重嵌开销**，state 每控制步变→set_prompt）。238ms<250ms 仍实时。
+- 100ep 初步（44ep）：task0/2/3 近满分，**task1 仅 5/10**，总体~82% **低于 naive JAX 99%** ⇒ **存在正确性缺口**，疑似 `state_prompt_mode="fixed"` 桶化 state 损失精度（或 state 归一化/动作反归一化 mismatch）。**待诊断**：对比 `state_prompt_mode="exact"`（精确但每步重建图、慢）vs fixed；逐 task 定位。
+- ⚠️ 诚实结论：FlashRT **延迟复现成功**（128ms bench / 232ms 闭环，实时✓），但**闭环成功率尚未追平 naive**，正确性需先修。这本身是个发现：state-in-prompt 的精确处理是边缘集成的非平凡坑。
+
+**待补**：① 诊断 task1 掉精度（state_prompt_mode exact vs fixed / 归一化对拍）；② 精度对拍（FlashRT vs naive JAX 同 obs 同 noise cosine）；③ production preset（cache_frames=2）可选。
 
 **原始日志**：`results/g5_flashrt/bench_lossless_int8.log`、`bench_bf16_reference.log`。
 
-## 5. 来源
+## 5. 参考文献精读与论文可行性评估（2026-11-24）
+
+### 5.1 关键参考文献（精读，明确重叠与缝隙）
+
+| 论文 | arxiv / venue | 核心方法 | 与本项目重叠 |
+|---|---|---|---|
+| **VLA-Cache** | 2502.02175 / **NeurIPS 2025**（153 引） | training-free 自适应视觉 token KV 缓存：①像素余弦相似度检测静态 patch（τ=0.996）复用 KV ②任务相关 patch（高 text-to-vision attn）强制重算 ③按层 attn 熵自适应复用比例。1.7× CUDA、+15% 控制频率、成功率几乎不掉。LIBERO+SIMPLER+真机 | **≈方案 B 核心**（自适应视觉缓存+像素门控）已被发表 |
+| **Gated VLA-Cache** | 2608.10824 / UTokyo | 在 VLA-Cache 上加**神经内省门控**：action token top-1/top-2 **logit margin**（模型置信度）低→失效缓存重算。自调节（难任务 24% 步触发），恢复盲目缓存掉的精度 100%+、保留 80% 算力，帕累托最优。OpenVLA/OFT，4 LIBERO suite，A100 | **「自适应门控」也已发表**；且**明确测试并否掉 action-delta（运动量）门控**（认为运动信号只反映相位、不反映不确定性） |
+| **OxyGen** | 2603.14371 | 多任务 VLA 统一 KV 管理：跨任务 prefix KV 共享 + continuous batching，3.7×、70Hz | 侧重多任务并行，非单任务缓存 |
+| **RTC** | 2506.07339 / Black et al（392 引） | PI 实时 chunking：async 执行 + **观测引导 denoising 校正**（ΠGDM+inpainting）处理 obs 陈旧 | 正是我们 prefetch 墙的工业界解法 |
+| **PhyAI** | 2608.03682 | control-time roofline `L_overlap=max(L_inf,L_env)` + 统一 runtime + 加速分类（QuantVLA/ActQuant/EfficientVLA/VLA-Pruner/SnapFlow…） | **我们的 control-time 框架被独立覆盖** |
+| FlashRT | github | 手写 kernel+融合+CUDA graph+INT8 W8A8，Orin/Thor/RTX | 方案 A 复现对象 |
+
+### 5.2 诚实可行性评估
+
+**核心判断：自适应视觉 KV 缓存 + 门控的思路已被 VLA-Cache（NeurIPS）与 Gated VLA-Cache 发表，方案 B 核心非新颖。** 但存在一个真实窄缝隙：
+
+- VLA-Cache / Gated VLA-Cache 均针对 **autoregressive VLA**（OpenVLA，离散 action token）；Gated 的 logit margin **依赖离散 action token softmax**。
+- **π0.5 是 flow-matching（连续动作、无 action token logits）⇒ Gated 门控信号不适用**。
+- 且它们都在 **A100 数据中心**测，**未碰边缘实时截止期**。
+
+| 目标 | 可行性 | 说明 |
+|---|---|---|
+| 技术报告/博客（portfolio） | ✅ | 完全可行、有价值 |
+| arxiv preprint | ✅ | 可行，需清晰差异化 |
+| Workshop（CoRL/ICRA/MLSys）/ RA-L systems | 🟡 | 靠 flow-matching 门控 + edge deadline + 扎实实验 |
+| 顶会主会（NeurIPS/CoRL main） | 🔴 | 核心已发表，新颖性增量，难 |
+
+**最硬资产不是方案 B，而是系统/测量研究**：roofline（prefix compute-bound + weight-only INT4 零收益，FlashRT 1.39× 验证）+ prefetch 墙量化（CI）+ control-time 框架 + Orin sm_87 实证。定位应为 **systems/measurement 论文**，非新算法突破。
+
+### 5.3 方案 B 新颖性修正（flow-matching 专属）
+
+据 §5.1，方案 B 门控信号修正（**放弃以本体感觉为主门控**——Gated 已论证运动信号有盲区）：
+
+- **主门控 = flow-matching 内禀信号**：denoising 残差范数 / flow 速度（每步去噪增量大小，反映模型在该观测下的不确定性，类比 logit margin 但适用于连续动作）。残差大→场景关键→重算；小→可复用。**填 Gated VLA-Cache 留下的 flow-matching 空白**。
+- **截止期耦合（独有）**：重算赶得上 `replan/f_control` 就重算（新鲜），否则复用（保实时）——把缓存决策挂到 control-time roofline。
+- **本体感觉 = 辅助信号**（预测视觉变化），非主门控。
+- **两级缓存**：Tier1 SigLIP 特征精确缓存（像素门控，零误差）；Tier2 prefix KV 近似缓存（flow 内禀门控）。
+- **成败关键（先验证）**：flow 残差门控是否真比像素门控好（帕累托优于 VLA-Cache）。若不好 ⇒ 方案 B 新颖性不足，降级为复现+测量研究。
+
+## 6. 来源
 
 - FlashRT Orin 指南 https://github.com/flashrt-project/FlashRT/blob/main/docs/deployment_orin.md
 - FlashRT USAGE / bench_pi05.py https://github.com/flashrt-project/FlashRT/blob/main/USAGE.md
@@ -227,3 +272,8 @@ run Gemma2B prefill (over cached-or-fresh visual + fresh state) + action expert
 - Seeed《GR00T N1.7 全 TRT on AGX Orin》https://wiki.seeedstudio.com/deploy_full_weight_gr00t_n1.7_tensorrt_jetpack7.2_agx_orin/
 - Figure Helix https://www.figure.ai/news/helix ；Modal/PI https://modal.com/blog/physical-intelligence-runs-real-time-remote-inference-for-robotic-control-on-modal
 - 完整证据库见记忆 `vla-realtime-edge-deployment-landscape`
+- VLA-Cache（NeurIPS 2025）https://arxiv.org/abs/2502.02175
+- Gated VLA-Cache（神经内省门控）https://arxiv.org/abs/2608.10824
+- OxyGen（多任务 KV 管理）https://arxiv.org/abs/2603.14371
+- RTC（PI 实时 chunking）https://arxiv.org/abs/2506.07339
+- OpenVLA-OFT https://arxiv.org/abs/2502.19645 ；SmolVLA https://arxiv.org/abs/2506.01844
