@@ -214,14 +214,21 @@ run Gemma2B prefill (over cached-or-fresh visual + fresh state) + action expert
 5. **tied weights**：save_file 不含 `lm_head.weight`（PaliGemma tied 到 embed_tokens）⇒ 补 `lm_head.weight = embed_tokens.weight.clone()`。
 6. 产物：`pi05_libero_pytorch/model.safetensors`（6.7GB bf16）+ config.json + assets。脚本存 `/home/vision/chenrunbin/g5_flashrt/FlashRT/`（patch_lowmem.py / run_lowmem.sh / bench_*.sh）。
 
-**闭环验证（2026-11-24，进行中）**：FlashRT 包成 openpi 协议 websocket server（`flashrt_server.py`，`state_prompt_mode="fixed"`），pc-3070 跑 LIBERO sync replan=5。
-- 冒烟 task0 ×2 = **2/2 成功**，server_L1≈238ms（**比 bench 128ms 高~110ms = state-in-prompt 每步重嵌开销**，state 每控制步变→set_prompt）。238ms<250ms 仍实时。
-- 100ep 初步（44ep）：task0/2/3 近满分，**task1 仅 5/10**，总体~82% **低于 naive JAX 99%** ⇒ **存在正确性缺口**，疑似 `state_prompt_mode="fixed"` 桶化 state 损失精度（或 state 归一化/动作反归一化 mismatch）。**待诊断**：对比 `state_prompt_mode="exact"`（精确但每步重建图、慢）vs fixed；逐 task 定位。
-- ⚠️ 诚实结论：FlashRT **延迟复现成功**（128ms bench / 232ms 闭环，实时✓），但**闭环成功率尚未追平 naive**，正确性需先修。这本身是个发现：state-in-prompt 的精确处理是边缘集成的非平凡坑。
+**闭环验证（2026-11-24）+ 根因 A/B**：FlashRT 包成 openpi 协议 websocket server（`flashrt_server.py`），pc-3070 跑 LIBERO sync replan=5。
+- **坑1（已修，非根因）**：初版 adapter 把 client 原始 state 塞进 prompt。但 **pi05_libero 配置 `discrete_state_input=False` ⇒ 根本不用 state**（`TokenizePrompt` 置 state=None，纯视觉+语言）。传 state 会加模型未见过的 "State:" token。修复=set_prompt 不传 state。
+- **坑2（真根因）= INT8 量化敏感性**：去 state 后 task1 仍掉。BF16/INT8 A/B（task0+task1 各 5ep）：
 
-**待补**：① 诊断 task1 掉精度（state_prompt_mode exact vs fixed / 归一化对拍）；② 精度对拍（FlashRT vs naive JAX 同 obs 同 noise cosine）；③ production preset（cache_frames=2）可选。
+  | 模式 | task0 | task1 | 闭环 server_L1 |
+  |---|---|---|---|
+  | INT8 W8A8 | 5/5 | **2/5** ✗ | ~205 ms |
+  | BF16 | 5/5 | **5/5** ✓ | ~274 ms |
 
-**原始日志**：`results/g5_flashrt/bench_lossless_int8.log`、`bench_bf16_reference.log`。
+  ⇒ **BF16 修好 task1，INT8 是掉精度根因**。FlashRT 宣称「cache_frames=1 逐位无损」是 INT8≈BF16 的**数值**近似，但**闭环成功率不无损**——INT8 小误差在控制中累积，特定 task（task1）掉到~40%（旧 100ep INT8 run task1 5/10 一致）。
+- **诚实结论（精度-速度权衡）**：① INT8 128ms(bench)/~205ms(闭环) 实时✓ 但部分 task 精度✗；② BF16 精度✓ 但闭环~274ms（replan=5 预算 250ms 贴边/略超，replan=10 预算 500ms 则实时✓）。**「无损 INT8 破墙」需要限定**：INT8 破延迟墙但有精度代价；BF16+replan=10 是另一条保精度破墙路。
+- **研究价值**：这恰是「边缘 VLA 量化的精度-速度-实时三维权衡」的实证发现，比单纯「复现 128ms」更有料，接论文叙事。
+- **待补**：① INT8 用**真实 LIBERO 数据校准**（当前 server 用随机 dummy 校准，可能 INT8 scale 失配；真实校准或可挽回精度）；② 全量 100ep BF16 + INT8 各跑拿稳健 CI；③ 精度对拍 cosine 量化 INT8 误差。
+
+**原始日志**：`results/g5_flashrt/`（bench_lossless_int8 / bench_bf16_reference / closedloop_int8_nostate_smoke / closedloop_bf16_smoke / closedloop_int8_statebug_partial）。
 
 ## 5. 参考文献精读与论文可行性评估（2026-11-24）
 
